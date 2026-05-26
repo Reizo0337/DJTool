@@ -1,3 +1,8 @@
+"""
+analyze_mix.py — DJTool
+Splits a DJ mix audio file into chunks and identifies each track using ACRCloud.
+Uses only Python stdlib (no extra pip packages needed).
+"""
 import sys
 import os
 import json
@@ -5,203 +10,282 @@ import time
 import base64
 import hashlib
 import hmac
-import urllib.request
-import urllib.parse
-import struct
-import wave
 import subprocess
 import tempfile
+import shutil
+import http.client
+import mimetypes
 
-def sign_request(access_key, access_secret, http_method, http_uri, data):
-    """Sign request for ACRCloud API."""
-    timestamp = str(int(time.time()))
-    string_to_sign = '\n'.join([http_method, http_uri, access_key, 'audio', '1', timestamp])
-    sign = base64.b64encode(
-        hmac.new(access_secret.encode('utf-8'), string_to_sign.encode('utf-8'), digestmod=hashlib.sha1).digest()
-    ).decode('utf-8')
-    return sign, timestamp
+# ─── ACCLOUD SIGNING ──────────────────────────────────────────────────────────
 
-def recognize_audio_chunk(chunk_path, access_key, access_secret, host):
-    """Send a chunk to ACRCloud and return the result."""
+def build_signature(access_key, access_secret, timestamp):
+    """Build HMAC-SHA1 signature exactly as ACRCloud expects."""
+    http_method      = 'POST'
+    http_uri         = '/v1/identify'
+    data_type        = 'audio'
+    signature_version = '1'
+    string_to_sign = '\n'.join([
+        http_method, http_uri, access_key,
+        data_type, signature_version, timestamp
+    ])
+    secret_bytes = access_secret.encode('utf-8')
+    sign_bytes   = string_to_sign.encode('utf-8')
+    digest = hmac.new(secret_bytes, sign_bytes, digestmod=hashlib.sha1).digest()
+    return base64.b64encode(digest).decode('utf-8')
+
+# ─── MULTIPART FORM (stdlib, no requests needed) ──────────────────────────────
+
+def encode_multipart(fields, files):
+    """
+    Encode multipart/form-data exactly like ACRCloud SDK expects.
+    fields: dict of str -> str
+    files:  list of (field_name, filename, file_bytes, content_type)
+    Returns (body_bytes, content_type_header)
+    """
+    boundary = '----AcrCloudBoundary' + str(int(time.time() * 1000))
+    CRLF = b'\r\n'
+    body = b''
+
+    # Text fields
+    for name, value in fields.items():
+        body += b'--' + boundary.encode() + CRLF
+        body += f'Content-Disposition: form-data; name="{name}"'.encode() + CRLF
+        body += CRLF
+        body += value.encode('utf-8') + CRLF
+
+    # File fields
+    for (field_name, filename, data, content_type) in files:
+        body += b'--' + boundary.encode() + CRLF
+        body += f'Content-Disposition: form-data; name="{field_name}"; filename="{filename}"'.encode() + CRLF
+        body += f'Content-Type: {content_type}'.encode() + CRLF
+        body += CRLF
+        body += data + CRLF
+
+    body += b'--' + boundary.encode() + b'--' + CRLF
+    content_type = f'multipart/form-data; boundary={boundary}'
+    return body, content_type
+
+# ─── ACRCloud IDENTIFY ────────────────────────────────────────────────────────
+
+def recognize_chunk(chunk_path, access_key, access_secret, host):
+    """
+    Send one audio chunk to ACRCloud /v1/identify.
+    Returns the parsed JSON response dict.
+    """
     with open(chunk_path, 'rb') as f:
         audio_data = f.read()
 
-    http_method = 'POST'
-    http_uri = '/v1/identify'
-    sign, timestamp = sign_request(access_key, access_secret, http_method, http_uri, audio_data)
+    if len(audio_data) < 1000:
+        return {'status': {'code': -2, 'msg': 'chunk too small'}}
 
-    boundary = 'AcrBoundary' + str(int(time.time()))
-    body = b''
-    
+    timestamp = str(int(time.time()))
+    signature = build_signature(access_key, access_secret, timestamp)
+
     fields = {
-        'access_key': access_key,
-        'sample_bytes': str(len(audio_data)),
-        'timestamp': timestamp,
-        'signature': sign,
-        'data_type': 'audio',
+        'access_key':        access_key,
+        'timestamp':         timestamp,
+        'signature':         signature,
+        'data_type':         'audio',
         'signature_version': '1',
+        'sample_bytes':      str(len(audio_data)),
     }
+    files = [('sample', 'sample.mp3', audio_data, 'audio/mpeg')]
 
-    for key, val in fields.items():
-        body += f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{val}\r\n'.encode()
-
-    body += f'--{boundary}\r\nContent-Disposition: form-data; name="sample"; filename="chunk.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n'.encode()
-    body += audio_data
-    body += f'\r\n--{boundary}--\r\n'.encode()
-
-    url = f'https://{host}/v1/identify'
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            'Content-Type': f'multipart/form-data; boundary={boundary}',
-            'Content-Length': str(len(body)),
-        },
-        method='POST'
-    )
+    body, content_type = encode_multipart(fields, files)
 
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode('utf-8'))
+        conn = http.client.HTTPSConnection(host, timeout=25)
+        conn.request(
+            'POST',
+            '/v1/identify',
+            body=body,
+            headers={
+                'Content-Type':   content_type,
+                'Content-Length': str(len(body)),
+            }
+        )
+        resp = conn.getresponse()
+        raw  = resp.read().decode('utf-8')
+        conn.close()
+        return json.loads(raw)
     except Exception as e:
         return {'status': {'code': -1, 'msg': str(e)}}
 
-def split_audio_with_ffmpeg(input_path, chunk_seconds=20, overlap=5):
-    """Split audio into overlapping chunks using ffmpeg."""
-    # Get duration
-    probe_cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', input_path]
-    
-    # Try local ffmpeg first
-    local_ffprobe = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffprobe.exe')
-    local_ffmpeg = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffmpeg.exe')
-    
-    ffprobe_cmd = local_ffprobe if os.path.exists(local_ffprobe) else 'ffprobe'
-    ffmpeg_cmd = local_ffmpeg if os.path.exists(local_ffmpeg) else 'ffmpeg'
+# ─── FFMPEG HELPERS ───────────────────────────────────────────────────────────
 
-    result = subprocess.run([ffprobe_cmd, '-v', 'quiet', '-print_format', 'json', '-show_format', input_path],
-                           capture_output=True, text=True)
-    
+def find_ffmpeg():
+    """Find ffmpeg/ffprobe — checks local dir first, then PATH."""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    is_win = sys.platform == 'win32'
+    ext = '.exe' if is_win else ''
+
+    for name in ['ffmpeg', 'ffprobe']:
+        local = os.path.join(script_dir, name + ext)
+        if os.path.exists(local):
+            # local binary wins
+            pass
+
+    ffmpeg  = os.path.join(script_dir, 'ffmpeg' + ext)
+    ffprobe = os.path.join(script_dir, 'ffprobe' + ext)
+
+    if not os.path.exists(ffmpeg):
+        ffmpeg  = 'ffmpeg'
+    if not os.path.exists(ffprobe):
+        ffprobe = 'ffprobe'
+
+    return ffmpeg, ffprobe
+
+FFMPEG, FFPROBE = find_ffmpeg()
+
+def get_duration(audio_path):
+    """Get audio duration in seconds using ffprobe."""
     try:
+        result = subprocess.run(
+            [FFPROBE, '-v', 'quiet', '-print_format', 'json',
+             '-show_format', audio_path],
+            capture_output=True, text=True, timeout=30
+        )
         info = json.loads(result.stdout)
-        duration = float(info['format']['duration'])
-    except:
-        duration = 3600  # fallback 1 hour
+        return float(info['format']['duration'])
+    except Exception:
+        return 3600.0  # fallback: assume 1 hour
 
-    chunks = []
-    start = 0
-    chunk_idx = 0
-    temp_dir = tempfile.mkdtemp()
+def extract_chunk(audio_path, start_sec, duration_sec, out_path):
+    """
+    Extract a time-slice from audio_path, saving as MP3 to out_path.
+    Returns True on success.
+    """
+    cmd = [
+        FFMPEG, '-y',
+        '-ss', str(start_sec),
+        '-i', audio_path,
+        '-t', str(duration_sec),
+        '-vn',                          # no video
+        '-acodec', 'libmp3lame',
+        '-ar', '44100',                 # 44.1kHz — ACRCloud requirement
+        '-ab', '128k',
+        '-ac', '1',                     # mono is fine for fingerprinting
+        out_path,
+        '-loglevel', 'error',
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=60)
+    return result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 2000
 
-    while start < duration:
-        chunk_path = os.path.join(temp_dir, f'chunk_{chunk_idx:04d}.mp3')
-        cmd = [
-            ffmpeg_cmd, '-y', '-ss', str(start), '-i', input_path,
-            '-t', str(chunk_seconds), '-q:a', '4',
-            '-acodec', 'libmp3lame', chunk_path, '-loglevel', 'quiet'
-        ]
-        subprocess.run(cmd, capture_output=True)
-        if os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 1000:
-            chunks.append((start, chunk_path))
-        start += chunk_seconds - overlap
-        chunk_idx += 1
+# ─── FORMATTING ───────────────────────────────────────────────────────────────
 
-    return chunks, temp_dir, duration
-
-def format_time(seconds):
-    """Format seconds to HH:MM:SS."""
+def fmt_time(seconds):
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    if h > 0:
-        return f'{h:02d}:{m:02d}:{s:02d}'
-    return f'{m:02d}:{s:02d}'
+    return f'{h:02d}:{m:02d}:{s:02d}' if h > 0 else f'{m:02d}:{s:02d}'
+
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
-    if len(sys.argv) < 6:
-        print('Usage: analyze_mix.py <audio_file> <acr_key> <acr_secret> <acr_host> <chunk_seconds>')
+    if len(sys.argv) < 5:
+        print('Usage: analyze_mix.py <audio_file> <acr_key> <acr_secret> <acr_host> [chunk_seconds]')
         sys.exit(1)
 
-    audio_file = sys.argv[1]
-    acr_key = sys.argv[2]
-    acr_secret = sys.argv[3]
-    acr_host = sys.argv[4]
-    chunk_seconds = int(sys.argv[5]) if len(sys.argv) > 5 else 20
+    audio_file   = sys.argv[1]
+    acr_key      = sys.argv[2]
+    acr_secret   = sys.argv[3]
+    acr_host     = sys.argv[4].strip()
+    chunk_sec    = int(sys.argv[5]) if len(sys.argv) > 5 else 20
+    overlap_sec  = 5
+
+    # Remove https:// prefix if user pasted full URL
+    acr_host = acr_host.replace('https://', '').replace('http://', '').strip('/')
 
     if not os.path.exists(audio_file):
-        print(f'PROGRESS:0:Error: archivo no encontrado')
+        print('PROGRESS:0:Error: archivo de audio no encontrado', flush=True)
         sys.exit(1)
 
-    print(f'PROGRESS:2:Dividiendo el audio en fragmentos...', flush=True)
-    chunks, temp_dir, total_duration = split_audio_with_ffmpeg(audio_file, chunk_seconds, overlap=5)
-    
-    total_chunks = len(chunks)
-    print(f'PROGRESS:5:{total_chunks} fragmentos generados. Iniciando reconocimiento...', flush=True)
+    # ── Step 1: get duration ──────────────────────────────────────────────────
+    print('PROGRESS:2:Leyendo duración del audio...', flush=True)
+    total_duration = get_duration(audio_file)
+    print(f'PROGRESS:3:Duración total: {fmt_time(total_duration)}', flush=True)
 
-    tracks = {}  # key: "artist - title" → track info
-    track_list = []  # ordered by first appearance
+    # ── Step 2: chunk loop ────────────────────────────────────────────────────
+    temp_dir = tempfile.mkdtemp(prefix='djtool_')
+    tracks   = {}       # dedup key → track info
+    results  = []       # ordered list
 
-    for i, (start_time, chunk_path) in enumerate(chunks):
-        progress = 5 + int((i / total_chunks) * 90)
-        print(f'PROGRESS:{progress}:Analizando {format_time(start_time)} de {format_time(total_duration)}...', flush=True)
+    step  = chunk_sec - overlap_sec
+    total = max(1, int((total_duration - overlap_sec) / step))
+    idx   = 0
+    start = 0.0
 
-        result = recognize_audio_chunk(chunk_path, acr_key, acr_secret, acr_host)
-        
-        try:
-            status_code = result.get('status', {}).get('code', -1)
-            if status_code == 0:
-                music = result['metadata']['music'][0]
-                title = music.get('title', 'Unknown')
-                artists = music.get('artists', [])
-                artist = artists[0]['name'] if artists else 'Unknown'
-                album = music.get('album', {}).get('name', '')
-                label = music.get('label', '')
-                release_date = music.get('release_date', '')
-                
-                # External metadata (Spotify, etc.)
-                ext_meta = music.get('external_metadata', {})
-                spotify = ext_meta.get('spotify', {})
-                spotify_id = spotify.get('track', {}).get('id', '')
-                
-                track_key = f'{artist.lower()}|||{title.lower()}'
-                
-                if track_key not in tracks:
-                    track_info = {
-                        'timestamp': format_time(start_time),
-                        'timestamp_seconds': start_time,
-                        'title': title,
-                        'artist': artist,
-                        'album': album,
-                        'label': label,
-                        'release_date': release_date,
-                        'spotify_id': spotify_id,
-                        'spotify_url': f'https://open.spotify.com/track/{spotify_id}' if spotify_id else '',
-                        'cover_url': f'https://i.scdn.co/image/{spotify.get("track", {}).get("id", "")}' if spotify_id else '',
-                        'score': music.get('score', 0),
-                        'acr_id': music.get('acrid', ''),
-                    }
-                    tracks[track_key] = track_info
-                    track_list.append(track_info)
-        except (KeyError, IndexError, TypeError):
-            pass  # No match for this chunk
+    print(f'PROGRESS:5:Analizando {total} fragmentos...', flush=True)
 
-        # Rate limiting
-        time.sleep(0.3)
-        
-        # Cleanup chunk
-        try:
-            os.remove(chunk_path)
-        except:
-            pass
+    while start < total_duration:
+        pct     = 5 + int((idx / max(total, 1)) * 90)
+        pos_str = fmt_time(start)
+        dur_str = fmt_time(total_duration)
+        print(f'PROGRESS:{pct}:Analizando {pos_str} / {dur_str}...', flush=True)
 
-    # Cleanup temp dir
-    try:
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    except:
-        pass
+        chunk_path = os.path.join(temp_dir, f'chunk_{idx:04d}.mp3')
+        ok = extract_chunk(audio_file, start, chunk_sec, chunk_path)
 
-    print(f'PROGRESS:100:¡Análisis completo! {len(track_list)} tracks encontrados.', flush=True)
-    print(f'RESULT:{json.dumps(track_list)}', flush=True)
+        if ok:
+            result = recognize_chunk(chunk_path, acr_key, acr_secret, acr_host)
+            code   = result.get('status', {}).get('code', -1)
+            msg    = result.get('status', {}).get('msg', '')
+
+            # Debug — visible in Node.js stderr log
+            print(f'  chunk {idx}: t={pos_str} code={code} msg={msg}', flush=True)
+
+            if code == 0:
+                try:
+                    music     = result['metadata']['music'][0]
+                    title     = music.get('title', 'Unknown')
+                    artists   = music.get('artists', [{}])
+                    artist    = artists[0].get('name', 'Unknown') if artists else 'Unknown'
+                    album     = music.get('album', {}).get('name', '')
+                    label     = music.get('label', '')
+                    rel_date  = music.get('release_date', '')
+                    score     = music.get('score', 0)
+
+                    ext_meta  = music.get('external_metadata', {})
+                    spotify   = ext_meta.get('spotify', {})
+                    sp_id     = spotify.get('track', {}).get('id', '')
+
+                    key = f'{artist.lower()}|||{title.lower()}'
+                    if key not in tracks:
+                        entry = {
+                            'timestamp':        fmt_time(start),
+                            'timestamp_seconds': start,
+                            'title':            title,
+                            'artist':           artist,
+                            'album':            album,
+                            'label':            label,
+                            'release_date':     rel_date,
+                            'score':            score,
+                            'spotify_id':       sp_id,
+                            'spotify_url':      f'https://open.spotify.com/track/{sp_id}' if sp_id else '',
+                        }
+                        tracks[key] = entry
+                        results.append(entry)
+                        print(f'  ✓ FOUND: {artist} - {title}', flush=True)
+                except (KeyError, IndexError, TypeError) as e:
+                    print(f'  parse error: {e}', flush=True)
+
+            # Cleanup chunk
+            try:
+                os.remove(chunk_path)
+            except Exception:
+                pass
+
+        # Rate limiting — ACRCloud free: 100 req/day, so pace ourselves
+        time.sleep(0.5)
+
+        start += step
+        idx   += 1
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    print(f'PROGRESS:100:¡Listo! {len(results)} tracks encontrados.', flush=True)
+    print(f'RESULT:{json.dumps(results, ensure_ascii=False)}', flush=True)
 
 if __name__ == '__main__':
     main()
