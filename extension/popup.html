@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DJDownloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <!-- Background Glow Orbs -->
+  <div class="bg-orbs">
+    <div class="orb orb-1"></div>
+    <div class="orb orb-2"></div>
+  </div>
+
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 32 32" fill="none">
+            <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="1.5" />
+            <circle cx="16" cy="16" r="4" fill="currentColor" />
+            <circle cx="16" cy="16" r="8" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3" />
+          </svg>
+        </div>
+        <span class="logo-text">DJ<span class="accent">Downloader</span></span>
+      </div>
+      <button class="settings-toggle" id="settings-toggle" title="Ajustes">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+    </header>
+
+    <!-- Main View -->
+    <div class="view" id="main-view">
+      <!-- Active URL Detection -->
+      <div class="detect-card">
+        <div class="detect-header">
+          <span class="detect-status" id="detect-status">Buscando enlace...</span>
+          <span class="platform-badge" id="platform-badge" style="display:none;">YouTube</span>
+        </div>
+        <div class="detect-content">
+          <p class="detect-title" id="detect-title">Abre una canción en Spotify, YouTube o SoundCloud</p>
+          <p class="detect-url" id="detect-url">Ningún enlace compatible detectado.</p>
+        </div>
+      </div>
+
+      <!-- Format Selection -->
+      <div class="format-section">
+        <span class="section-label">Formato de Salida</span>
+        <div class="format-pills">
+          <label class="fpill">
+            <input type="radio" name="ext-fmt" value="mp3" checked>
+            <span>MP3 <em>320k</em></span>
+          </label>
+          <label class="fpill">
+            <input type="radio" name="ext-fmt" value="wav">
+            <span>WAV</span>
+          </label>
+          <label class="fpill">
+            <input type="radio" name="ext-fmt" value="aiff">
+            <span>AIFF</span>
+          </label>
+          <label class="fpill">
+            <input type="radio" name="ext-fmt" value="flac">
+            <span>FLAC</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="actions">
+        <button class="dl-btn" id="dl-btn" disabled>
+          <svg class="dl-icon" viewBox="0 0 24 24" fill="none">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+            <polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <span id="dl-btn-text">Descargar Track</span>
+        </button>
+      </div>
+
+      <!-- Live progress info -->
+      <div class="progress-wrap" id="progress-wrap" style="display:none;">
+        <div class="progress-bar">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <div class="progress-msg" id="progress-msg">Preparando descarga...</div>
+      </div>
+    </div>
+
+    <!-- Settings View -->
+    <div class="view hidden" id="settings-view">
+      <div class="settings-card">
+        <h3>Servidor de DJDownloader</h3>
+        <p class="settings-desc">La extensión enviará las peticiones a este servidor. Por defecto usa tu servidor local.</p>
+        
+        <div class="input-wrap">
+          <label for="server-url">URL del Servidor</label>
+          <input type="url" id="server-url" placeholder="http://localhost:3000" value="http://localhost:3000">
+        </div>
+
+        <div class="server-status-check">
+          <span class="status-dot" id="server-status-dot"></span>
+          <span id="server-status-text">Comprobando conexión...</span>
+        </div>
+
+        <button class="save-btn" id="save-settings">Guardar Ajustes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

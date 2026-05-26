@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "DJDownloader Companion",
+  "version": "1.0.0",
+  "description": "Descarga música de YouTube, Spotify y SoundCloud con un solo clic conectado a tu servidor de DJDownloader.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://localhost:3000/*",
+    "https://*.spotify.com/*",
+    "https://*.youtube.com/*",
+    "https://*.soundcloud.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.youtube.com/*",
+        "https://open.spotify.com/*",
+        "https://soundcloud.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
