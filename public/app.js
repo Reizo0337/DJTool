@@ -3,7 +3,16 @@
    Frontend logic: WebSocket, API calls, UI state
    ══════════════════════════════════════════════ */
 
-const API = 'http://localhost:3000';
+// Auto-detect API URL: in production the frontend is served from the same server
+const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? `http://${window.location.hostname}:3000`
+  : window.location.origin;
+
+// WebSocket URL
+const WS_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? `ws://${window.location.hostname}:3000`
+  : `wss://${window.location.host}`;
+
 let ws = null;
 let wsReady = false;
 let currentJobId = null;
@@ -92,7 +101,7 @@ function switchMode(mode) {
 // ─── WEBSOCKET ─────────────────────────────────────────────────────────────────
 
 function connectWS() {
-  ws = new WebSocket(`ws://localhost:3000`);
+  ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
     wsReady = true;
@@ -358,30 +367,39 @@ async function downloadTrack() {
   const title  = document.getElementById('preview-title').textContent || 'track';
   const btn    = document.getElementById('download-btn');
 
+  // Use streaming download endpoint — works in both local and cloud
+  const streamUrl = `${API}/api/download-stream?url=${encodeURIComponent(currentTrackUrl)}&format=${format}&title=${encodeURIComponent(title)}`;
+
   btn.disabled = true;
-  btn.innerHTML = `<svg class="spin" viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-6.219-8.56" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Descargando...`;
+  btn.innerHTML = `<svg class="spin" viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-6.219-8.56" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Preparando...`;
 
   document.getElementById('dl-progress').classList.remove('hidden');
-  document.getElementById('dl-progress-bar').style.width = '0%';
-  document.getElementById('dl-progress-msg').textContent = 'Iniciando descarga...';
+  document.getElementById('dl-progress-bar').style.width = '30%';
+  document.getElementById('dl-progress-msg').textContent = 'Descargando... (el archivo llegará a tu carpeta de descargas)';
 
-  try {
-    const resp = await fetch(`${API}/api/download`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: currentTrackUrl, format, title }),
-    });
-    const data = await resp.json();
-    if (data.jobId) {
-      currentDownloadJobId = data.jobId;
-    } else {
-      throw new Error(data.error || 'Error');
-    }
-  } catch (err) {
-    showToast(`❌ ${err.message}`, 'error');
-    btn.disabled = false;
+  // Trigger browser download via hidden link
+  const a = document.createElement('a');
+  a.href = streamUrl;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+
+  // Simulate progress (streaming doesn't give progress events)
+  let pct = 30;
+  const interval = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 8, 95);
+    document.getElementById('dl-progress-bar').style.width = `${pct}%`;
+  }, 800);
+
+  // Complete after a reasonable time
+  setTimeout(() => {
+    clearInterval(interval);
+    document.getElementById('dl-progress-bar').style.width = '100%';
+    document.getElementById('dl-progress-msg').textContent = '✅ Descarga iniciada en tu navegador';
+    showToast('✅ Descarga iniciada', 'success');
     resetDownloadBtn();
-  }
+  }, 4000);
 }
 
 let currentDownloadJobId = null;
