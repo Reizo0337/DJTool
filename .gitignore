@@ -5,3 +5,5 @@ downloads/
 .env
 ffmpeg.zip
 ffmpeg_extract/
+ffmpeg.exe
+ffprobe.exe
