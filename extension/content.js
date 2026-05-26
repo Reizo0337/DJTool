@@ -119,7 +119,14 @@
       triggerGenericDownload(window.location.href, btn);
     });
 
-    anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+    const subscribeBtn = document.querySelector('ytd-watch-metadata #subscribe-button') || 
+                         document.querySelector('#subscribe-button');
+
+    if (subscribeBtn) {
+      subscribeBtn.parentNode.insertBefore(btn, subscribeBtn.nextSibling);
+    } else {
+      anchor.parentNode.insertBefore(btn, anchor.nextSibling);
+    }
   }
 
   // 2. SPOTIFY INJECTION
