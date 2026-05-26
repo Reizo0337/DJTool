@@ -150,34 +150,50 @@ async function handlePlaylist(url) {
       buffer = parts.pop();
       
       for (const p of parts) {
-        if (p.startsWith('event: end')) {
+        // Each SSE "part" may have multiple lines like:
+        // "event: meta\ndata: {...}"
+        // We extract named event and data separately.
+        const lines = p.split('\n');
+        const eventLine = lines.find(l => l.startsWith('event: '));
+        const dataLine  = lines.find(l => l.startsWith('data: '));
+        const eventName = eventLine ? eventLine.substring(7) : '';
+        const dataStr   = dataLine  ? dataLine.substring(6)  : '';
+
+        if (eventName === 'end') {
            showToast(`✅ ${batchItems.length} tracks cargados`, 'ok');
            return;
         }
-        if (p.startsWith('event: meta')) {
-           const meta = JSON.parse(p.substring(12));
-           showToast(`Cargando playlist: ${meta.platform}`, '');
-        }
-        if (p.startsWith('event: error')) {
-           const err = JSON.parse(p.substring(13));
-           showToast(`❌ ${err.error}`, 'err');
+        if (eventName === 'error') {
+           try {
+             const errObj = JSON.parse(dataStr);
+             showToast(`❌ ${errObj.error}`, 'err');
+           } catch { showToast('❌ Error al cargar playlist', 'err'); }
            return;
         }
-        if (p.startsWith('data: ')) {
-           const t = JSON.parse(p.substring(6));
-           const item = {
-             title:       t.title || 'Unknown',
-             artist:      t.artist || t.uploader || '',
-             thumbnail:   t.thumbnail || '',
-             url:         t.url || url,
-             isSpotify:   t.isSpotify || isSpotifyUrl(t.url || url),
-             searchQuery: t.searchQuery || `${t.artist || ''} ${t.title || ''}`.trim(),
-             duration:    t.duration,
-             status:      'pending',
-             checked:     true,
-           };
-           batchItems.push(item);
-           appendBatchItem(item, batchItems.length - 1);
+        if (eventName === 'meta') {
+           try {
+             const meta = JSON.parse(dataStr);
+             showToast(`Cargando playlist: ${meta.platform}`, '');
+           } catch {}
+        }
+        if (!eventName && dataStr) {
+           // Regular track data line
+           try {
+             const t = JSON.parse(dataStr);
+             const item = {
+               title:       t.title || 'Unknown',
+               artist:      t.artist || t.uploader || '',
+               thumbnail:   t.thumbnail || '',
+               url:         t.url || url,
+               isSpotify:   t.isSpotify || isSpotifyUrl(t.url || url),
+               searchQuery: t.searchQuery || `${t.artist || ''} ${t.title || ''}`.trim(),
+               duration:    t.duration,
+               status:      'pending',
+               checked:     true,
+             };
+             batchItems.push(item);
+             appendBatchItem(item, batchItems.length - 1);
+           } catch {}
         }
       }
     }
@@ -356,53 +372,48 @@ function downloadOne(idx) {
   setTimeout(() => setBatchStatus(idx, 'done'), 3500);
 }
 
-// ─── DOWNLOAD ALL (ZIP Streaming) ─────────────────────────────────────────────
+// ─── DOWNLOAD ALL (ZIP via fetch) ─────────────────────────────────────────────
 async function downloadAllZip() {
   const selected = batchItems.filter(i => i.checked && i.status !== 'done');
   if (!selected.length) { showToast('No hay tracks seleccionados', 'err'); return; }
-  
+
   const fmt = getFormat();
-  const tracksPayload = selected.map(item => {
-    return {
-      title: item.title,
-      url: item.isSpotify ? `SEARCH:${item.searchQuery}` : item.url
-    };
-  });
-  
-  showToast(`⬇️ Solicitando ZIP de ${selected.length} tracks...`, 'ok');
-  
-  // We must trigger this as a standard form submit so the browser handles the ZIP stream natively
-  // without us having to buffer it in memory using fetch.
-  
-  const form = document.createElement('form');
-  form.method = 'POST';
-  form.action = `${API}/api/download-zip`;
-  form.style.display = 'none';
-  
-  const inputTracks = document.createElement('input');
-  inputTracks.type = 'hidden';
-  inputTracks.name = 'tracks';
-  inputTracks.value = JSON.stringify(tracksPayload);
-  form.appendChild(inputTracks);
-  
-  const inputFormat = document.createElement('input');
-  inputFormat.type = 'hidden';
-  inputFormat.name = 'format';
-  inputFormat.value = fmt;
-  form.appendChild(inputFormat);
-  
-  document.body.appendChild(form);
-  form.submit();
-  document.body.removeChild(form);
-  
-  showToast('✅ ZIP generándose... empezará a descargar pronto', 'ok');
-  
-  // Mark all as active/done for UI purposes
-  batchItems.forEach((item, idx) => {
-    if (item.checked && item.status !== 'done') {
-      setBatchStatus(idx, 'done');
+  const tracksPayload = selected.map(item => ({
+    title: item.title,
+    url: item.isSpotify ? `SEARCH:${item.searchQuery}` : item.url
+  }));
+
+  showToast(`⬇️ Generando ZIP de ${selected.length} tracks... (puede tardar)`, 'ok');
+
+  try {
+    const resp = await fetch(`${API}/api/download-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tracks: tracksPayload, format: fmt })
+    });
+
+    if (!resp.ok) {
+      const errJson = await resp.json().catch(() => ({ error: 'Error desconocido' }));
+      throw new Error(errJson.error || 'Error al generar ZIP');
     }
-  });
+
+    const blob = await resp.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = `DJDownloader_${selected.length}tracks_${fmt}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(blobUrl); document.body.removeChild(a); }, 500);
+
+    showToast(`✅ ZIP listo — ${selected.length} tracks descargados`, 'ok');
+
+    batchItems.forEach((item, idx) => {
+      if (item.checked && item.status !== 'done') setBatchStatus(idx, 'done');
+    });
+  } catch (e) {
+    showToast(`❌ ${e.message}`, 'err');
+  }
 }
 
 function clearBatch() {
