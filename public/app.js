@@ -1,555 +1,428 @@
-/* ═══════════════════════════════════════════════
-   DJTool — app.js
-   Frontend logic: WebSocket, API calls, UI state
-   ══════════════════════════════════════════════ */
+/* ═══════════════════════════════════════
+   DJDownloader — app.js
+   ═══════════════════════════════════════ */
 
-// Auto-detect API URL: in production the frontend is served from the same server
 const API = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ? `http://${window.location.hostname}:3000`
   : window.location.origin;
 
-// WebSocket URL
-const WS_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-  ? `ws://${window.location.hostname}:3000`
-  : `wss://${window.location.host}`;
+// ─── STATE ────────────────────────────────────────────────────────────────────
+let currentInfo     = null;   // single track info
+let batchItems      = [];     // [{title, artist, thumbnail, url, isSpotify, searchQuery, status}]
+let isDownloading   = false;
 
-let ws = null;
-let wsReady = false;
-let currentJobId = null;
-let currentTrackUrl = null;
-let previewPlaying = false;
-let detectedTracks = [];
+// ─── FORMAT ───────────────────────────────────────────────────────────────────
+function getFormat() { return document.querySelector('input[name="fmt"]:checked')?.value || 'mp3'; }
 
-// ─── SETTINGS ─────────────────────────────────────────────────────────────────
-
-function loadSettings() {
-  return {
-    acrHost:   localStorage.getItem('acr_host')    || '',
-    acrKey:    localStorage.getItem('acr_key')     || '',
-    acrSecret: localStorage.getItem('acr_secret')  || '',
-    chunkSec:  localStorage.getItem('chunk_sec')   || '20',
-  };
-}
-
-function saveSettings() {
-  const host   = document.getElementById('acr-host').value.trim();
-  const key    = document.getElementById('acr-key').value.trim();
-  const secret = document.getElementById('acr-secret').value.trim();
-  const chunk  = document.getElementById('chunk-seconds').value.trim();
-
-  localStorage.setItem('acr_host',   host);
-  localStorage.setItem('acr_key',    key);
-  localStorage.setItem('acr_secret', secret);
-  localStorage.setItem('chunk_sec',  chunk);
-
-  showToast('✅ Ajustes guardados', 'success');
-}
-
-function populateSettings() {
-  const s = loadSettings();
-  document.getElementById('acr-host').value    = s.acrHost;
-  document.getElementById('acr-key').value     = s.acrKey;
-  document.getElementById('acr-secret').value  = s.acrSecret;
-  document.getElementById('chunk-seconds').value = s.chunkSec;
-}
-
-function toggleSecret() {
-  const inp = document.getElementById('acr-secret');
-  inp.type = inp.type === 'password' ? 'text' : 'password';
-}
-
-async function testConnection() {
-  const s = loadSettings();
-  const btn = document.getElementById('test-btn');
-  const result = document.getElementById('test-result');
-  result.className = 'test-result'; result.classList.remove('hidden');
-  result.textContent = '⏳ Probando conexión...';
-  btn.disabled = true;
-
-  try {
-    // We send a tiny fake audio request — ACRCloud returns "no result" but confirms connection
-    const response = await fetch(`${API}/api/test-acr`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ acrHost: s.acrHost, acrKey: s.acrKey, acrSecret: s.acrSecret }),
-    });
-    const data = await response.json();
-    if (data.ok) {
-      result.className = 'test-result success';
-      result.textContent = '✅ Conexión exitosa con ACRCloud';
-    } else {
-      result.className = 'test-result error';
-      result.textContent = `❌ Error: ${data.error || 'Credenciales inválidas'}`;
-    }
-  } catch (err) {
-    result.className = 'test-result error';
-    result.textContent = '❌ No se pudo conectar al servidor. ¿Está iniciado?';
-  }
-  btn.disabled = false;
-}
-
-// ─── MODE SWITCHING ────────────────────────────────────────────────────────────
-
-function switchMode(mode) {
-  document.querySelectorAll('.mode-section').forEach(s => s.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-  document.getElementById(`mode-${mode}`).classList.add('active');
-  document.getElementById(`nav-${mode}`).classList.add('active');
-  if (mode === 'download') refreshDownloads();
-}
-
-// ─── WEBSOCKET ─────────────────────────────────────────────────────────────────
-
-function connectWS() {
-  ws = new WebSocket(WS_URL);
-
-  ws.onopen = () => {
-    wsReady = true;
-    setStatusDot(true);
-  };
-
-  ws.onclose = () => {
-    wsReady = false;
-    setStatusDot(false);
-    setTimeout(connectWS, 3000);
-  };
-
-  ws.onerror = () => {
-    wsReady = false;
-    setStatusDot(false);
-  };
-
-  ws.onmessage = (evt) => {
-    try {
-      const msg = JSON.parse(evt.data);
-      handleWSMessage(msg);
-    } catch {}
-  };
-}
-
-function setStatusDot(connected) {
-  const dot = document.getElementById('status-dot');
-  dot.style.background = connected ? 'var(--success)' : 'var(--error)';
-  dot.style.boxShadow = connected ? '0 0 8px var(--success)' : '0 0 8px var(--error)';
-  dot.title = connected ? 'Servidor conectado' : 'Servidor desconectado';
-}
-
-function handleWSMessage(msg) {
-  if (msg.jobId && msg.jobId.startsWith('dl_')) {
-    handleDownloadProgress(msg);
-    return;
-  }
-
-  if (!currentJobId || msg.jobId !== currentJobId) return;
-
-  const progressBar = document.getElementById('progress-bar');
-  const progressMsg = document.getElementById('progress-msg');
-
-  if (msg.stage === 'downloading') {
-    setStage('downloading');
-    progressBar.style.width = `${msg.progress * 0.5}%`; // first 50%
-    progressMsg.textContent = msg.message;
-
-  } else if (msg.stage === 'analyzing') {
-    setStage('analyzing');
-    progressBar.style.width = `${50 + msg.progress * 0.5}%`; // 50-100%
-    progressMsg.textContent = msg.message;
-
-  } else if (msg.stage === 'done') {
-    setStage('done');
-    progressBar.style.width = '100%';
-    progressMsg.textContent = msg.message;
-    detectedTracks = msg.tracks || [];
-    showResults(detectedTracks);
-    document.getElementById('waveform-anim').style.animationPlayState = 'paused';
-    document.querySelectorAll('.wave-bar').forEach(b => b.style.animation = 'none');
-
-  } else if (msg.stage === 'error') {
-    setStage('error');
-    progressMsg.textContent = `❌ ${msg.message}`;
-    document.getElementById('detect-btn').disabled = false;
-    showToast(`❌ ${msg.message}`, 'error');
-  }
-}
-
-function setStage(name) {
-  const stages = ['downloading', 'analyzing', 'done'];
-  const idx = stages.indexOf(name);
-  stages.forEach((s, i) => {
-    const el = document.getElementById(`stage-${s}`);
-    if (!el) return;
-    el.classList.remove('active', 'done');
-    if (name === 'error') { el.classList.add(''); }
-    else if (i < idx) el.classList.add('done');
-    else if (i === idx) el.classList.add('active');
+// ─── FORMAT PILL TOGGLE ───────────────────────────────────────────────────────
+document.querySelectorAll('.fpill input').forEach(inp => {
+  inp.addEventListener('change', () => {
+    document.querySelectorAll('.fpill').forEach(p => p.classList.remove('active'));
+    inp.closest('.fpill').classList.add('active');
   });
+});
+
+// ─── AUTO-RESIZE TEXTAREA ─────────────────────────────────────────────────────
+const urlInput = document.getElementById('url-input');
+urlInput.addEventListener('input', () => {
+  urlInput.style.height = 'auto';
+  urlInput.style.height = Math.min(urlInput.scrollHeight, 140) + 'px';
+});
+urlInput.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSearch(); }
+});
+
+// ─── PLATFORM DETECTION (client-side) ─────────────────────────────────────────
+function isPlaylistUrl(url) {
+  return (
+    /youtube\.com\/playlist/i.test(url) ||
+    /[?&]list=/i.test(url) ||
+    /soundcloud\.com\/.*\/sets\//i.test(url) ||
+    /spotify\.com\/(playlist|album)\//i.test(url)
+  );
 }
 
-// ─── ANALYZE ──────────────────────────────────────────────────────────────────
+function isSpotifyUrl(url) { return /spotify\.com/i.test(url); }
 
-async function startAnalysis() {
-  const url = document.getElementById('detect-url').value.trim();
-  if (!url) { showToast('Introduce un enlace válido', 'error'); return; }
-
-  const s = loadSettings();
-  if (!s.acrHost || !s.acrKey || !s.acrSecret) {
-    showToast('Configura las credenciales de ACRCloud en Ajustes', 'error');
-    switchMode('settings');
-    return;
-  }
-
-  // Reset UI
-  document.getElementById('detect-results').classList.add('hidden');
-  document.getElementById('detect-progress').classList.remove('hidden');
-  document.getElementById('detect-btn').disabled = true;
-  document.getElementById('tracks-grid').innerHTML = '';
-  document.querySelectorAll('.wave-bar').forEach(b => b.style.animation = '');
-  setStage('downloading');
-  document.getElementById('progress-bar').style.width = '0%';
-  document.getElementById('progress-msg').textContent = 'Conectando...';
-
-  try {
-    const resp = await fetch(`${API}/api/analyze`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        url,
-        acrKey:    s.acrKey,
-        acrSecret: s.acrSecret,
-        acrHost:   s.acrHost,
-        chunkSeconds: parseInt(s.chunkSec),
-      }),
-    });
-    const data = await resp.json();
-    if (data.jobId) {
-      currentJobId = data.jobId;
-    } else {
-      throw new Error(data.error || 'Error desconocido');
-    }
-  } catch (err) {
-    document.getElementById('detect-btn').disabled = false;
-    document.getElementById('detect-progress').classList.add('hidden');
-    showToast(`❌ ${err.message}`, 'error');
-  }
+function getPlatformLabel(url) {
+  if (/youtube\.com|youtu\.be/i.test(url)) return 'YouTube';
+  if (/spotify\.com/i.test(url))           return 'Spotify';
+  if (/soundcloud\.com/i.test(url))        return 'SoundCloud';
+  if (/bandcamp\.com/i.test(url))          return 'Bandcamp';
+  if (/mixcloud\.com/i.test(url))          return 'Mixcloud';
+  return 'Web';
 }
 
-// ─── RESULTS ──────────────────────────────────────────────────────────────────
+// ─── MAIN SEARCH HANDLER ──────────────────────────────────────────────────────
+async function handleSearch() {
+  const raw  = urlInput.value.trim();
+  if (!raw) return;
 
-function showResults(tracks) {
-  const grid = document.getElementById('tracks-grid');
-  const results = document.getElementById('detect-results');
-  const count = document.getElementById('results-count');
-  
-  count.textContent = `${tracks.length} Track${tracks.length !== 1 ? 's' : ''} Detectado${tracks.length !== 1 ? 's' : ''}`;
-  
-  if (tracks.length === 0) {
-    grid.innerHTML = `<div class="empty-state" style="padding:40px">
-      <p>No se detectaron tracks. Prueba con un fragmento más largo o verifica tus credenciales.</p>
-    </div>`;
+  // Split by newlines or spaces to support multi-URL paste
+  const urls = raw.split(/[\n]+/).map(u => u.trim()).filter(u => u.length > 5);
+  if (urls.length === 0) return;
+
+  setBtnLoading(true);
+
+  // Detect if any URL is a playlist
+  if (urls.length === 1 && isPlaylistUrl(urls[0])) {
+    await handlePlaylist(urls[0]);
+  } else if (urls.length === 1) {
+    await handleSingle(urls[0]);
   } else {
-    grid.innerHTML = '';
-    tracks.forEach((t, i) => {
-      const card = createTrackCard(t, i + 1);
-      grid.appendChild(card);
-    });
+    // Multiple URLs → batch info
+    await handleMultipleUrls(urls);
   }
 
-  results.classList.remove('hidden');
-  document.getElementById('detect-btn').disabled = false;
+  setBtnLoading(false);
 }
 
-function createTrackCard(track, num) {
-  const card = document.createElement('div');
-  card.className = 'track-card';
-  card.style.animationDelay = `${(num - 1) * 0.05}s`;
-
-  const spotifyBtn = track.spotify_url
-    ? `<button class="track-action-btn spotify" title="Abrir en Spotify" onclick="window.open('${track.spotify_url}','_blank')">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12s4.477 10 10 10 10-4.477 10-10S17.523 2 12 2zm4.586 14.424c-.18.295-.563.387-.857.207-2.35-1.434-5.305-1.76-8.786-.963-.335.077-.67-.133-.746-.47-.077-.334.132-.67.47-.745 3.808-.87 7.076-.496 9.712 1.115.293.18.386.563.207.856zm1.223-2.723c-.226.367-.706.482-1.072.257-2.687-1.652-6.785-2.13-9.965-1.166-.413.127-.848-.106-.973-.517-.125-.413.108-.848.52-.972 3.632-1.102 8.147-.568 11.233 1.329.366.226.48.707.257 1.072v-.003zm.105-2.835C14.692 8.95 9.375 8.775 6.297 9.71c-.493.15-1.016-.13-1.166-.624-.148-.495.13-1.017.625-1.166 3.532-1.073 9.404-.866 13.115 1.337.444.264.590.838.327 1.282-.264.443-.838.59-1.284.327z"/></svg>
-      </button>` : '';
-
-  const label = track.label ? `· ${track.label}` : '';
-  const year  = track.release_date ? `· ${track.release_date.substring(0,4)}` : '';
-
-  card.innerHTML = `
-    <div class="track-num">${String(num).padStart(2,'0')}</div>
-    <div class="track-info">
-      <div class="track-timestamp">⏱ ${track.timestamp}</div>
-      <div class="track-name">${escHtml(track.title)}</div>
-      <div class="track-artist">${escHtml(track.artist)}</div>
-      ${label || year ? `<div class="track-meta">${escHtml(label)} ${escHtml(year)}</div>` : ''}
-    </div>
-    <div class="track-actions">
-      ${spotifyBtn}
-      <button class="track-action-btn" title="Copiar nombre" onclick="copyTrack('${escHtml(track.artist)} - ${escHtml(track.title)}')">
-        <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>
-      </button>
-    </div>
-  `;
-  return card;
-}
-
-function copyTrack(text) {
-  navigator.clipboard.writeText(text).then(() => showToast(`📋 Copiado: ${text}`, 'success'));
-}
-
-function copyTracklist() {
-  const text = detectedTracks.map((t, i) => `${String(i+1).padStart(2,'0')}. [${t.timestamp}] ${t.artist} - ${t.title}`).join('\n');
-  navigator.clipboard.writeText(text).then(() => showToast('📋 Tracklist copiada al portapapeles', 'success'));
-}
-
-function exportTracklist() {
-  if (!detectedTracks.length) return;
-  const text = detectedTracks.map((t, i) => `${String(i+1).padStart(2,'0')}. [${t.timestamp}] ${t.artist} - ${t.title}`).join('\n');
-  const blob = new Blob([text], { type: 'text/plain' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download = 'tracklist.txt';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast('📄 Tracklist exportada', 'success');
-}
-
-// ─── DOWNLOAD MODE ─────────────────────────────────────────────────────────────
-
-async function fetchTrackInfo() {
-  const url = document.getElementById('download-url').value.trim();
-  if (!url) { showToast('Introduce un enlace válido', 'error'); return; }
-
-  const btn = document.getElementById('info-btn');
-  btn.disabled = true;
-  btn.querySelector('.btn-text').textContent = 'Buscando...';
-  document.getElementById('track-preview-card').classList.add('hidden');
-
+// ─── SINGLE TRACK ─────────────────────────────────────────────────────────────
+async function handleSingle(url) {
+  hideSections();
   try {
     const resp = await fetch(`${API}/api/info`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
     });
     const info = await resp.json();
     if (info.error) throw new Error(info.error);
-
-    currentTrackUrl = url;
-    showTrackPreview(info, url);
-  } catch (err) {
-    showToast(`❌ ${err.message}`, 'error');
-  } finally {
-    btn.disabled = false;
-    btn.querySelector('.btn-text').textContent = 'Buscar';
+    currentInfo = info;
+    showSinglePreview(info);
+  } catch (e) {
+    showToast('❌ ' + e.message, 'err');
   }
 }
 
-function showTrackPreview(info, url) {
+function showSinglePreview(info) {
   document.getElementById('preview-title').textContent   = info.title || '—';
-  document.getElementById('preview-artist').textContent  = info.uploader || '—';
-  document.getElementById('preview-platform').textContent = info.extractor || 'YouTube';
-  document.getElementById('preview-duration').textContent = info.duration ? formatDuration(info.duration) : '—';
-  document.getElementById('preview-views').textContent   = info.view_count ? `${formatNum(info.view_count)} vistas` : '';
+  document.getElementById('preview-artist').textContent  = info.uploader || '';
+  document.getElementById('preview-platform').textContent = info.platform || getPlatformLabel(info.originalUrl || '');
+  document.getElementById('preview-duration').textContent = info.duration ? fmtTime(info.duration) : '';
 
-  const img = document.getElementById('preview-img');
+  const img  = document.getElementById('preview-thumb');
+  const ph   = document.getElementById('preview-thumb-placeholder');
   if (info.thumbnail) {
     img.src = info.thumbnail;
     img.classList.remove('hidden');
+    ph.classList.add('hidden');
   } else {
     img.classList.add('hidden');
+    ph.classList.remove('hidden');
   }
 
-  document.getElementById('track-preview-card').classList.remove('hidden');
+  document.getElementById('preview-section').classList.remove('hidden');
   document.getElementById('dl-progress').classList.add('hidden');
-  document.getElementById('dl-progress-bar').style.width = '0%';
-  document.getElementById('download-btn').disabled = false;
+  document.getElementById('dl-progress-fill').style.width = '0%';
+  document.getElementById('dl-btn').disabled = false;
+  resetDlBtn();
 }
 
-async function downloadTrack() {
-  if (!currentTrackUrl) { showToast('Primero busca un track', 'error'); return; }
+// ─── PLAYLIST ─────────────────────────────────────────────────────────────────
+async function handlePlaylist(url) {
+  hideSections();
+  showToast('🔍 Cargando playlist...', '');
 
-  const format = document.querySelector('input[name="format"]:checked').value;
-  const title  = document.getElementById('preview-title').textContent || 'track';
-  const btn    = document.getElementById('download-btn');
-
-  // Use streaming download endpoint — works in both local and cloud
-  const streamUrl = `${API}/api/download-stream?url=${encodeURIComponent(currentTrackUrl)}&format=${format}&title=${encodeURIComponent(title)}`;
-
-  btn.disabled = true;
-  btn.innerHTML = `<svg class="spin" viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-6.219-8.56" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Preparando...`;
-
-  document.getElementById('dl-progress').classList.remove('hidden');
-  document.getElementById('dl-progress-bar').style.width = '30%';
-  document.getElementById('dl-progress-msg').textContent = 'Descargando... (el archivo llegará a tu carpeta de descargas)';
-
-  // Trigger browser download via hidden link
-  const a = document.createElement('a');
-  a.href = streamUrl;
-  a.style.display = 'none';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-
-  // Simulate progress (streaming doesn't give progress events)
-  let pct = 30;
-  const interval = setInterval(() => {
-    pct = Math.min(pct + Math.random() * 8, 95);
-    document.getElementById('dl-progress-bar').style.width = `${pct}%`;
-  }, 800);
-
-  // Complete after a reasonable time
-  setTimeout(() => {
-    clearInterval(interval);
-    document.getElementById('dl-progress-bar').style.width = '100%';
-    document.getElementById('dl-progress-msg').textContent = '✅ Descarga iniciada en tu navegador';
-    showToast('✅ Descarga iniciada', 'success');
-    resetDownloadBtn();
-  }, 4000);
-}
-
-let currentDownloadJobId = null;
-
-function handleDownloadProgress(msg) {
-  if (msg.jobId !== currentDownloadJobId) return;
-
-  const bar = document.getElementById('dl-progress-bar');
-  const msg2 = document.getElementById('dl-progress-msg');
-
-  if (msg.stage === 'downloading') {
-    bar.style.width = `${msg.progress}%`;
-    msg2.textContent = `Descargando... ${msg.progress.toFixed(0)}%`;
-
-  } else if (msg.stage === 'done') {
-    bar.style.width = '100%';
-    msg2.textContent = `✅ ¡Descarga completada! → ${msg.filename}`;
-    showToast('✅ Descarga completada', 'success');
-    resetDownloadBtn();
-    refreshDownloads();
-
-  } else if (msg.stage === 'error') {
-    msg2.textContent = `❌ ${msg.message}`;
-    showToast(`❌ ${msg.message}`, 'error');
-    resetDownloadBtn();
-  }
-}
-
-function resetDownloadBtn() {
-  const btn = document.getElementById('download-btn');
-  btn.disabled = false;
-  btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg> Descargar`;
-}
-
-// ─── PREVIEW ──────────────────────────────────────────────────────────────────
-
-function togglePreview() {
-  const audio  = document.getElementById('preview-audio');
-  const icon   = document.getElementById('play-btn-icon');
-  const url    = currentTrackUrl;
-
-  if (!url) return;
-
-  if (previewPlaying) {
-    audio.pause();
-    previewPlaying = false;
-    icon.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
-  } else {
-    if (!audio.src || !audio.src.includes('stream-preview')) {
-      audio.src = `${API}/api/stream-preview?url=${encodeURIComponent(url)}`;
-    }
-    audio.play().catch(() => showToast('No se pudo cargar el preview', 'error'));
-    previewPlaying = true;
-    icon.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
-  }
-}
-
-// ─── DOWNLOADS LIBRARY ────────────────────────────────────────────────────────
-
-async function refreshDownloads() {
   try {
-    const resp = await fetch(`${API}/api/downloads`);
-    const files = await resp.json();
-    renderDownloads(files);
-  } catch {}
+    const resp = await fetch(`${API}/api/playlist-info`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    if (!data.tracks?.length) throw new Error('No se encontraron tracks');
+
+    batchItems = data.tracks.map(t => ({
+      title:       t.title || 'Unknown',
+      artist:      t.artist || t.uploader || '',
+      thumbnail:   t.thumbnail || '',
+      url:         t.url || url,
+      isSpotify:   t.isSpotify || isSpotifyUrl(t.url || url),
+      searchQuery: t.searchQuery || `${t.artist || ''} ${t.title || ''}`.trim(),
+      duration:    t.duration,
+      status:      'pending',
+      checked:     true,
+    }));
+
+    showBatch(`${data.platform} · ${data.tracks.length} tracks`);
+    showToast(`✅ ${data.tracks.length} tracks encontrados`, 'ok');
+  } catch (e) {
+    showToast('❌ ' + e.message, 'err');
+  }
 }
 
-function renderDownloads(files) {
-  const list = document.getElementById('downloads-list');
-  if (!files.length) {
-    list.innerHTML = `<div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="1.5"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-      <p>Aún no hay descargas</p>
-    </div>`;
-    return;
+// ─── MULTIPLE URLS ────────────────────────────────────────────────────────────
+async function handleMultipleUrls(urls) {
+  hideSections();
+  showToast(`🔍 Buscando ${urls.length} tracks...`, '');
+
+  try {
+    const resp = await fetch(`${API}/api/batch-info`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls })
+    });
+    const data = await resp.json();
+
+    batchItems = data.map(item => ({
+      title:       item.title || item.url || 'Unknown',
+      artist:      item.uploader || item.platform || '',
+      thumbnail:   item.thumbnail || '',
+      url:         item.url,
+      isSpotify:   item.isSpotify || isSpotifyUrl(item.url || ''),
+      searchQuery: item.searchQuery || item.title || '',
+      duration:    item.duration,
+      status:      item.error ? 'error' : 'pending',
+      checked:     !item.error,
+    }));
+
+    showBatch(`${urls.length} tracks`);
+    showToast(`✅ ${batchItems.length} tracks listos`, 'ok');
+  } catch (e) {
+    showToast('❌ ' + e.message, 'err');
   }
+}
+
+// ─── RENDER BATCH ─────────────────────────────────────────────────────────────
+function showBatch(label) {
+  document.getElementById('batch-section').classList.remove('hidden');
+  renderBatch();
+}
+
+function renderBatch() {
+  const list = document.getElementById('batch-list');
   list.innerHTML = '';
-  files.forEach(f => {
-    const ext = f.name.split('.').pop().toUpperCase();
-    const icon = ext === 'MP3' ? '🎵' : ext === 'WAV' ? '🎚️' : '⚡';
+  const checked = batchItems.filter(i => i.checked).length;
+  document.getElementById('batch-count').textContent = `${checked} / ${batchItems.length} seleccionados`;
+
+  batchItems.forEach((item, idx) => {
     const div = document.createElement('div');
-    div.className = 'download-item';
+    div.className = `batch-item ${item.status}`;
+    div.style.animationDelay = `${idx * 0.03}s`;
+    div.id = `batch-item-${idx}`;
+
+    const thumbHtml = item.thumbnail
+      ? `<img class="batch-thumb" src="${escHtml(item.thumbnail)}" alt="" onerror="this.style.display='none'">`
+      : `<div class="batch-thumb-placeholder">♪</div>`;
+
+    const statusText = { pending: '—', active: '⏬ Descargando', done: '✓ Listo', error: '✕ Error' }[item.status] || '—';
+    const dur = item.duration ? fmtTime(item.duration) : '';
+
     div.innerHTML = `
-      <div class="dl-icon">${icon}</div>
-      <div class="dl-name" title="${escHtml(f.name)}">${escHtml(f.name)}</div>
-      <div class="dl-size">${formatBytes(f.size)}</div>
-      <button class="dl-open" onclick="window.open('${API}/api/file/${encodeURIComponent(f.name)}','_blank')">Abrir</button>
+      <input type="checkbox" class="batch-check" ${item.checked ? 'checked' : ''} onchange="toggleCheck(${idx}, this.checked)" />
+      ${thumbHtml}
+      <div class="batch-info">
+        <div class="batch-title-text">${escHtml(item.title)}</div>
+        ${item.artist ? `<div class="batch-artist-text">${escHtml(item.artist)}</div>` : ''}
+        ${dur ? `<div class="batch-duration">${dur}</div>` : ''}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span class="batch-status ${item.status}">${statusText}</span>
+        ${item.status !== 'active' ? `
+        <button class="batch-dl-btn" title="Descargar este track" onclick="downloadOne(${idx})">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        </button>` : ''}
+      </div>
     `;
     list.appendChild(div);
   });
 }
 
-// ─── ACR TEST ENDPOINT (add to server) ────────────────────────────────────────
+function toggleCheck(idx, val) {
+  batchItems[idx].checked = val;
+  const checked = batchItems.filter(i => i.checked).length;
+  document.getElementById('batch-count').textContent = `${checked} / ${batchItems.length} seleccionados`;
+}
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
+// ─── DOWNLOAD SINGLE ──────────────────────────────────────────────────────────
+function downloadSingle() {
+  if (!currentInfo) return;
+  const fmt    = getFormat();
+  const dlUrl  = buildStreamUrl(currentInfo, fmt);
+  const title  = currentInfo.title || 'track';
 
-function showToast(msg, type = '') {
-  const toast = document.getElementById('toast');
-  toast.textContent = msg;
-  toast.className = `toast ${type}`;
-  toast.classList.add('show');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => toast.classList.remove('show'), 3500);
+  triggerDownload(dlUrl, title + '.' + fmt);
+
+  // Progress animation
+  document.getElementById('dl-progress').classList.remove('hidden');
+  animateProgress('dl-progress-fill', 'dl-progress-msg', title);
+}
+
+// ─── DOWNLOAD ONE FROM BATCH ──────────────────────────────────────────────────
+function downloadOne(idx) {
+  const item = batchItems[idx];
+  if (!item) return;
+  const fmt   = getFormat();
+  const dlUrl = buildStreamUrl(item, fmt);
+  triggerDownload(dlUrl, item.title + '.' + fmt);
+  setBatchStatus(idx, 'active');
+  setTimeout(() => setBatchStatus(idx, 'done'), 3500);
+}
+
+// ─── DOWNLOAD ALL (sequential) ────────────────────────────────────────────────
+async function downloadAll() {
+  const selected = batchItems.map((item, idx) => ({ item, idx })).filter(e => e.item.checked && e.item.status !== 'done');
+  if (!selected.length) { showToast('No hay tracks seleccionados', 'err'); return; }
+  if (isDownloading) { showToast('Ya hay una descarga en progreso', ''); return; }
+
+  isDownloading = true;
+  showToast(`⬇️ Descargando ${selected.length} tracks...`, 'ok');
+
+  const fmt = getFormat();
+  let done = 0;
+
+  for (const { item, idx } of selected) {
+    setBatchStatus(idx, 'active');
+    const dlUrl = buildStreamUrl(item, fmt);
+    triggerDownload(dlUrl, item.title + '.' + fmt);
+    // Wait between downloads to not overwhelm browser
+    await sleep(2800);
+    setBatchStatus(idx, 'done');
+    done++;
+    showToast(`⬇️ ${done}/${selected.length} — ${item.title}`, 'ok');
+  }
+
+  isDownloading = false;
+  showToast(`✅ ${done} tracks descargados`, 'ok');
+}
+
+function clearBatch() {
+  batchItems = [];
+  document.getElementById('batch-section').classList.add('hidden');
+  document.getElementById('batch-list').innerHTML = '';
+}
+
+function setBatchStatus(idx, status) {
+  batchItems[idx].status = status;
+  // Re-render just this item
+  const el = document.getElementById(`batch-item-${idx}`);
+  if (el) {
+    el.className = `batch-item ${status}`;
+    const statusEl = el.querySelector('.batch-status');
+    if (statusEl) {
+      statusEl.className = `batch-status ${status}`;
+      statusEl.textContent = { pending: '—', active: '⏬ Descargando', done: '✓ Listo', error: '✕ Error' }[status] || '—';
+    }
+  }
+}
+
+// ─── STREAM URL BUILDER ───────────────────────────────────────────────────────
+function buildStreamUrl(info, fmt) {
+  let dlUrl;
+  if (info.isSpotify || (info.searchQuery && isSpotifyUrl(info.originalUrl || info.url || ''))) {
+    dlUrl = `SEARCH:${info.searchQuery || info.title}`;
+  } else {
+    dlUrl = info.originalUrl || info.url || '';
+  }
+  return `${API}/api/stream?url=${encodeURIComponent(dlUrl)}&format=${fmt}&title=${encodeURIComponent(info.title || 'track')}`;
+}
+
+// ─── TRIGGER BROWSER DOWNLOAD ─────────────────────────────────────────────────
+function triggerDownload(href, filename) {
+  const a = document.createElement('a');
+  a.href     = href;
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => document.body.removeChild(a), 100);
+}
+
+// ─── PROGRESS ANIMATION (single) ─────────────────────────────────────────────
+function animateProgress(fillId, msgId, title) {
+  const fill = document.getElementById(fillId);
+  const msg  = document.getElementById(msgId);
+  if (!fill || !msg) return;
+
+  fill.style.width = '0%';
+  msg.textContent  = `Descargando ${title}...`;
+  document.getElementById('dl-btn').disabled = true;
+
+  let pct = 0;
+  const iv = setInterval(() => {
+    pct = Math.min(pct + Math.random() * 9, 92);
+    fill.style.width = pct + '%';
+  }, 600);
+
+  setTimeout(() => {
+    clearInterval(iv);
+    fill.style.width = '100%';
+    msg.textContent  = '✅ Descarga iniciada en tu navegador';
+    setTimeout(() => resetDlBtn(), 3000);
+  }, 4200);
+}
+
+function resetDlBtn() {
+  const btn = document.getElementById('dl-btn');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.innerHTML = `
+    <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+    Descargar`;
+}
+
+// ─── UI HELPERS ───────────────────────────────────────────────────────────────
+function hideSections() {
+  document.getElementById('preview-section').classList.add('hidden');
+  document.getElementById('batch-section').classList.add('hidden');
+}
+
+function setBtnLoading(loading) {
+  const btn = document.getElementById('search-btn');
+  if (loading) {
+    btn.classList.add('loading');
+    btn.innerHTML = `<svg class="spin" viewBox="0 0 24 24" fill="none"><path d="M21 12a9 9 0 1 1-6.22-8.56" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>`;
+  } else {
+    btn.classList.remove('loading');
+    btn.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2.5"/><path d="m21 21-4.35-4.35" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>`;
+  }
+}
+
+let toastTimer;
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className   = `toast show ${type}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3500);
+}
+
+function fmtTime(s) {
+  if (!s) return '';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  return h > 0
+    ? `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`
+    : `${m}:${String(sec).padStart(2,'0')}`;
 }
 
 function escHtml(str) {
-  if (!str) return '';
-  return String(str).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  return String(str || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
-function formatDuration(sec) {
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
-  const s = Math.floor(sec % 60);
-  if (h > 0) return `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
-  return `${m}:${String(s).padStart(2,'0')}`;
-}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-function formatNum(n) {
-  if (!n) return '';
-  if (n >= 1e6) return `${(n/1e6).toFixed(1)}M`;
-  if (n >= 1e3) return `${(n/1e3).toFixed(1)}K`;
-  return String(n);
+// ─── SERVER STATUS ────────────────────────────────────────────────────────────
+async function checkStatus() {
+  try {
+    const r = await fetch(`${API}/health`);
+    const ok = r.ok;
+    const pill = document.getElementById('status-pill');
+    const txt  = document.getElementById('status-text');
+    pill.classList.toggle('offline', !ok);
+    txt.textContent = ok ? 'En línea' : 'Desconectado';
+  } catch {
+    document.getElementById('status-pill').classList.add('offline');
+    document.getElementById('status-text').textContent = 'Desconectado';
+  }
 }
-
-function formatBytes(b) {
-  if (b >= 1e9) return `${(b/1e9).toFixed(1)} GB`;
-  if (b >= 1e6) return `${(b/1e6).toFixed(1)} MB`;
-  if (b >= 1e3) return `${(b/1e3).toFixed(1)} KB`;
-  return `${b} B`;
-}
-
-// Spinning animation for loading button
-const style = document.createElement('style');
-style.textContent = `.spin { animation: spin 1s linear infinite; width:18px; height:18px; }
-@keyframes spin { to { transform: rotate(360deg); } }`;
-document.head.appendChild(style);
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
+checkStatus();
+setInterval(checkStatus, 30000);
 
-document.addEventListener('DOMContentLoaded', () => {
-  populateSettings();
-  connectWS();
-  refreshDownloads();
-
-  // Enter key support
-  document.getElementById('detect-url').addEventListener('keydown', e => {
-    if (e.key === 'Enter') startAnalysis();
-  });
-  document.getElementById('download-url').addEventListener('keydown', e => {
-    if (e.key === 'Enter') fetchTrackInfo();
-  });
+// Paste detection — auto-search if pasting a URL
+urlInput.addEventListener('paste', () => {
+  setTimeout(() => {
+    const val = urlInput.value.trim();
+    if (val.startsWith('http')) handleSearch();
+  }, 100);
 });

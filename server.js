@@ -1,398 +1,302 @@
 require('dotenv').config();
-const express = require('express');
-const cors = require('cors');
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const http = require('http');
+const express   = require('express');
+const cors      = require('cors');
+const { spawn, execSync } = require('child_process');
+const path      = require('path');
+const fs        = require('fs');
+const http      = require('http');
+const https     = require('https');
 const WebSocket = require('ws');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server });
+const wss    = new WebSocket.Server({ server });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── HEALTH CHECK (for UptimeRobot / Render keep-alive) ──────────────────────
-app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+// ─── HEALTH ───────────────────────────────────────────────────────────────────
+app.get('/health', (_req, res) => res.json({ ok: true, uptime: process.uptime() }));
 
-// Ensure temp dir exists (downloads stream directly to browser in cloud mode)
-const TEMP_DIR = path.join(__dirname, 'temp');
-const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
-[TEMP_DIR, DOWNLOADS_DIR].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
+// ─── UTILS ────────────────────────────────────────────────────────────────────
+const IS_WIN = process.platform === 'win32';
 
-const IS_CLOUD = process.env.NODE_ENV === 'production';
-
-// WebSocket broadcast helper
-const clients = new Map();
-wss.on('connection', (ws) => {
-  const id = Date.now() + Math.random();
-  clients.set(id, ws);
-  ws.on('close', () => clients.delete(id));
-});
-
-function broadcast(jobId, data) {
-  clients.forEach(ws => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ jobId, ...data }));
-    }
-  });
+function findBin(name) {
+  const local = path.join(__dirname, name + (IS_WIN ? '.exe' : ''));
+  if (fs.existsSync(local)) return local;
+  try { execSync((IS_WIN ? 'where' : 'which') + ' ' + name, { stdio: 'pipe' }); return name; } catch {}
+  return name;
 }
 
-// ─── UTILS ───────────────────────────────────────────────────────────────────
+const YTDLP  = findBin('yt-dlp');
+const FFMPEG = findBin('ffmpeg');
+console.log(`yt-dlp : ${YTDLP}`);
+console.log(`ffmpeg : ${FFMPEG}`);
 
-function findBin(names, versionFlag = '--version') {
-  const isWin = process.platform === 'win32';
-  const whereCmd = isWin ? 'where' : 'which';
-  for (const name of names) {
-    try {
-      require('child_process').execSync(`${whereCmd} ${name}`, { stdio: 'pipe' });
-      return name;
-    } catch {}
-  }
-  return names[names.length - 1];
-}
-
-const YTDLP  = findBin(['yt-dlp', 'yt-dlp.exe']);
-const PYTHON = findBin(['python3', 'python', 'py']);
-console.log(`yt-dlp: ${YTDLP} | python: ${PYTHON}`);
-
-const YTDLP_EXTRA_ARGS = [
+const YTDLP_BASE = [
   '--no-check-certificates',
   '--no-warnings',
+  '--prefer-ffmpeg',
+  ...(FFMPEG !== 'ffmpeg' ? ['--ffmpeg-location', IS_WIN ? path.dirname(FFMPEG) : FFMPEG] : []),
 ];
 
-function sanitizeFilename(str) {
-  return str.replace(/[<>:"/\\|?*]/g, '_').substring(0, 100);
+const FORMATS = {
+  mp3:  { ext: 'mp3',  codec: 'mp3',  mime: 'audio/mpeg', postArgs: ['ffmpeg:-b:a 320k -ar 44100'] },
+  wav:  { ext: 'wav',  codec: 'wav',  mime: 'audio/wav',  postArgs: [] },
+  aiff: { ext: 'aiff', codec: 'aiff', mime: 'audio/aiff', postArgs: [] },
+  flac: { ext: 'flac', codec: 'flac', mime: 'audio/flac', postArgs: [] },
+};
+
+function sanitize(str) {
+  return String(str || 'track').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').trim().substring(0, 120);
 }
 
-// ─── ROUTE: ANALYZE MIX ──────────────────────────────────────────────────────
+// ─── PLATFORM DETECTION ───────────────────────────────────────────────────────
+function detectPlatform(url) {
+  if (/spotify\.com\/track/i.test(url))    return 'spotify-track';
+  if (/spotify\.com\/playlist/i.test(url)) return 'spotify-playlist';
+  if (/spotify\.com\/album/i.test(url))    return 'spotify-album';
+  if (/youtube\.com\/playlist/i.test(url) || /youtu\.be.*list=/i.test(url)) return 'youtube-playlist';
+  if (/youtube\.com|youtu\.be/i.test(url)) return 'youtube-track';
+  if (/soundcloud\.com\/.*\/sets\//i.test(url)) return 'soundcloud-playlist';
+  if (/soundcloud\.com/i.test(url))        return 'soundcloud-track';
+  return 'generic';
+}
 
-app.post('/api/analyze', async (req, res) => {
-  const { url, acrKey, acrSecret, acrHost, chunkSeconds = 20 } = req.body;
+// ─── SPOTIFY HELPERS ──────────────────────────────────────────────────────────
 
-  if (!url) return res.status(400).json({ error: 'URL is required' });
-  if (!acrKey || !acrSecret || !acrHost) {
-    return res.status(400).json({ error: 'ACRCloud credentials required' });
-  }
-
-  const jobId = `job_${Date.now()}`;
-  const audioFile = path.join(TEMP_DIR, `${jobId}.mp3`);
-
-  // Respond immediately with jobId
-  res.json({ jobId, message: 'Analysis started' });
-
-  broadcast(jobId, { stage: 'downloading', progress: 0, message: 'Conectando con la fuente...' });
-
-  // Step 1: Download audio with yt-dlp
-  const ytArgs = [
-    url,
-    '-x',
-    '--audio-format', 'mp3',
-    '--audio-quality', '0',
-    '-o', audioFile,
-    '--no-playlist',
-    '--progress',
-    '--newline',
-  ];
-
-  const ytProcess = spawn(YTDLP, ytArgs, { env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
-
-  let downloadDone = false;
-
-  ytProcess.stdout.on('data', (data) => {
-    const line = data.toString();
-    const match = line.match(/(\d+\.?\d*)%/);
-    if (match) {
-      const pct = parseFloat(match[1]);
-      broadcast(jobId, { stage: 'downloading', progress: pct, message: `Descargando audio... ${pct.toFixed(0)}%` });
-    }
+// oEmbed for single tracks (no auth)
+function spotifyOembed(url) {
+  return new Promise(resolve => {
+    const oembed = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`;
+    https.get(oembed, { headers: { 'User-Agent': 'Mozilla/5.0' } }, res => {
+      let d = ''; res.on('data', c => d += c);
+      res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+    }).on('error', () => resolve(null));
   });
+}
 
-  ytProcess.stderr.on('data', (data) => {
-    const line = data.toString();
-    const match = line.match(/(\d+\.?\d*)%/);
-    if (match) {
-      const pct = parseFloat(match[1]);
-      broadcast(jobId, { stage: 'downloading', progress: pct, message: `Descargando audio... ${pct.toFixed(0)}%` });
-    }
-  });
+// Fetch Spotify embed page and extract tracklist from __NEXT_DATA__
+function spotifyPlaylistTracks(playlistUrl) {
+  return new Promise(resolve => {
+    const match = playlistUrl.match(/spotify\.com\/(playlist|album)\/([a-zA-Z0-9]+)/);
+    if (!match) return resolve([]);
+    const type = match[1], id = match[2];
+    const embedUrl = `https://open.spotify.com/embed/${type}/${id}?utm_source=oembed`;
 
-  ytProcess.on('close', (code) => {
-    if (code !== 0) {
-      broadcast(jobId, { stage: 'error', message: 'Error al descargar el audio. Verifica el enlace.' });
-      return;
-    }
-
-    broadcast(jobId, { stage: 'analyzing', progress: 0, message: 'Analizando la sesión...' });
-
-    // Step 2: Run Python analysis
-    const pyScript = path.join(__dirname, 'analyze_mix.py');
-    const pyArgs = [pyScript, audioFile, acrKey, acrSecret, acrHost, String(chunkSeconds)];
-
-    const pyProcess = spawn(PYTHON, pyArgs, {
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUNBUFFERED: '1' }
-    });
-
-    let pyOutput = '';
-    let pyError = '';
-
-    pyProcess.stdout.on('data', (data) => {
-      const text = data.toString();
-      // Check for progress lines
-      const lines = text.split('\n');
-      lines.forEach(line => {
-        if (line.startsWith('PROGRESS:')) {
-          const parts = line.split(':');
-          const pct = parseFloat(parts[1]) || 0;
-          const msg = parts.slice(2).join(':').trim();
-          broadcast(jobId, { stage: 'analyzing', progress: pct, message: msg });
-        } else if (line.startsWith('RESULT:')) {
-          pyOutput += line.replace('RESULT:', '');
+    const req = https.get(embedUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html',
+      }
+    }, res => {
+      let html = '';
+      res.on('data', c => html += c);
+      res.on('end', () => {
+        try {
+          const m = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+          if (!m) return resolve([]);
+          const data = JSON.parse(m[1]);
+          // Navigate to tracks
+          const entity = data?.props?.pageProps?.state?.data?.entity;
+          const items  = entity?.trackList || entity?.tracks?.items || [];
+          const tracks = items.map(item => {
+            const t = item?.track || item;
+            const artists = (t?.artists || t?.subtitle || '').split
+              ? (t.subtitle || '')
+              : (t?.artists || []).map(a => a.name).join(', ');
+            const title   = t?.title || t?.name || item?.title || '';
+            const artist  = typeof artists === 'string' ? artists : (t?.artists || []).map(a => a.name).join(', ');
+            const imgUrl  = t?.albumOfTrack?.coverArt?.sources?.[0]?.url || t?.image || '';
+            const uid     = t?.trackDuration ? (t?.uri || '') : '';
+            return { title, artist, thumbnail: imgUrl, searchQuery: `${artist} - ${title}`, uid };
+          }).filter(t => t.title);
+          resolve(tracks);
+        } catch (e) {
+          console.error('Spotify parse error:', e.message);
+          resolve([]);
         }
       });
     });
-
-    pyProcess.stderr.on('data', (data) => {
-      pyError += data.toString();
-    });
-
-    pyProcess.on('close', (pyCode) => {
-      // Clean up temp file
-      try { fs.unlinkSync(audioFile); } catch {}
-
-      if (pyCode !== 0 || !pyOutput) {
-        console.error('Python error:', pyError);
-        broadcast(jobId, { stage: 'error', message: 'Error al analizar el audio. Verifica las credenciales de ACRCloud.' });
-        return;
-      }
-
-      try {
-        const tracks = JSON.parse(pyOutput);
-        broadcast(jobId, { stage: 'done', tracks, message: `¡Listo! Se encontraron ${tracks.length} tracks.` });
-      } catch (e) {
-        broadcast(jobId, { stage: 'error', message: 'Error al parsear los resultados.' });
-      }
-    });
+    req.on('error', () => resolve([]));
+    req.setTimeout(15000, () => { req.destroy(); resolve([]); });
   });
-});
+}
 
-// ─── ROUTE: DOWNLOAD TRACK (streaming directo al navegador) ──────────────────
-// En cloud: stream directo al browser sin guardar en disco
-// En local: guarda en disco Y permite streaming
-
-app.get('/api/download-stream', (req, res) => {
-  const { url, format = 'best', title = 'track' } = req.query;
-  if (!url) return res.status(400).send('URL required');
-
-  const safeName = sanitizeFilename(decodeURIComponent(title));
-  let ext, audioFormat;
-  if (format === 'mp3')      { ext = 'mp3';  audioFormat = 'mp3'; }
-  else if (format === 'wav') { ext = 'wav';  audioFormat = 'wav'; }
-  else                       { ext = 'opus'; audioFormat = 'best'; }
-
-  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.${ext}"`);
-  res.setHeader('Content-Type', ext === 'wav' ? 'audio/wav' : ext === 'mp3' ? 'audio/mpeg' : 'audio/ogg');
-  res.setHeader('Transfer-Encoding', 'chunked');
-
-  const ytArgs = [
-    decodeURIComponent(url), '-x',
-    '--audio-format', audioFormat,
-    '--audio-quality', '0',
-    '-o', '-',              // output to stdout
-    '--no-playlist',
-    '--quiet',
-    ...YTDLP_EXTRA_ARGS,
-  ];
-
-  const proc = spawn(YTDLP, ytArgs);
-  proc.stdout.pipe(res);
-  proc.stderr.on('data', d => console.error('[yt-dlp]', d.toString().trim()));
-  proc.on('close', (code) => {
-    if (code !== 0 && !res.headersSent) res.status(500).send('Download failed');
-    else { try { res.end(); } catch {} }
-  });
-  req.on('close', () => proc.kill());
-});
-
-// Also keep disk-based download for local mode (for the library feature)
-app.post('/api/download', async (req, res) => {
-  const { url, format = 'best', title = 'track' } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL is required' });
-
-  const jobId = `dl_${Date.now()}`;
-  const safeName = sanitizeFilename(title);
-  let ext, audioFormat;
-  if (format === 'mp3')      { ext = 'mp3';  audioFormat = 'mp3'; }
-  else if (format === 'wav') { ext = 'wav';  audioFormat = 'wav'; }
-  else                       { ext = 'opus'; audioFormat = 'best'; }
-
-  const outFile = path.join(DOWNLOADS_DIR, `${safeName}_${jobId}.${ext}`);
-  res.json({ jobId, message: 'Download started' });
-
-  const ytArgs = [
-    url, '-x',
-    '--audio-format', audioFormat,
-    '--audio-quality', '0',
-    '-o', outFile,
-    '--no-playlist', '--newline',
-    ...YTDLP_EXTRA_ARGS,
-  ];
-
-  const ytProcess = spawn(YTDLP, ytArgs);
-  const onProgress = (data) => {
-    const match = data.toString().match(/(\d+\.?\d*)%/);
-    if (match) broadcast(jobId, { stage: 'downloading', progress: parseFloat(match[1]), filename: path.basename(outFile) });
-  };
-  ytProcess.stdout.on('data', onProgress);
-  ytProcess.stderr.on('data', onProgress);
-  ytProcess.on('close', (code) => {
-    if (code !== 0) { broadcast(jobId, { stage: 'error', message: 'Error al descargar el track.' }); return; }
-    broadcast(jobId, { stage: 'done', message: 'Descarga completada', filename: path.basename(outFile), path: outFile });
-  });
-});
-
-// ─── ROUTE: GET TRACK INFO / PREVIEW URL ─────────────────────────────────────
-
+// ─── ROUTE: SINGLE TRACK INFO ─────────────────────────────────────────────────
 app.post('/api/info', async (req, res) => {
   const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL is required' });
+  if (!url?.trim()) return res.status(400).json({ error: 'URL requerida' });
 
-  const ytArgs = [url, '--dump-json', '--no-playlist', '--skip-download'];
-  const proc = spawn(YTDLP, ytArgs);
-  let output = '';
-  let errOut = '';
+  const kind = detectPlatform(url);
 
-  proc.stdout.on('data', d => { output += d.toString(); });
-  proc.stderr.on('data', d => { errOut += d.toString(); });
+  if (kind === 'spotify-track') {
+    const info = await spotifyOembed(url);
+    if (!info) return res.status(500).json({ error: 'No se pudo obtener info de Spotify' });
+    return res.json({
+      title: info.title, uploader: 'Spotify', platform: 'Spotify',
+      thumbnail: info.thumbnail_url, duration: null,
+      isSpotify: true, searchQuery: info.title, originalUrl: url,
+    });
+  }
 
-  proc.on('close', (code) => {
-    if (code !== 0) return res.status(500).json({ error: 'Could not fetch info', details: errOut });
+  const proc = spawn(YTDLP, [
+    url, '--dump-json', '--no-playlist', '--skip-download', ...YTDLP_BASE,
+  ]);
+  let out = '', err = '';
+  proc.stdout.on('data', d => out += d);
+  proc.stderr.on('data', d => err += d);
+  proc.on('close', code => {
+    if (code !== 0) return res.status(500).json({ error: 'No se pudo obtener información', details: err.slice(0, 300) });
     try {
-      const info = JSON.parse(output);
+      const info = JSON.parse(out.trim().split('\n')[0]);
       res.json({
-        title: info.title,
-        uploader: info.uploader || info.channel,
-        duration: info.duration,
-        thumbnail: info.thumbnail,
-        webpage_url: info.webpage_url,
-        extractor: info.extractor,
-        view_count: info.view_count,
-        like_count: info.like_count,
-        upload_date: info.upload_date,
-        description: info.description ? info.description.substring(0, 500) : '',
+        title: info.title, uploader: info.uploader || info.channel || '',
+        platform: info.extractor_key || 'Unknown',
+        thumbnail: info.thumbnail, duration: info.duration,
+        isSpotify: false, originalUrl: url,
       });
-    } catch {
-      res.status(500).json({ error: 'Parse error' });
+    } catch { res.status(500).json({ error: 'Error al parsear la respuesta' }); }
+  });
+});
+
+// ─── ROUTE: PLAYLIST INFO ─────────────────────────────────────────────────────
+app.post('/api/playlist-info', async (req, res) => {
+  const { url } = req.body;
+  if (!url?.trim()) return res.status(400).json({ error: 'URL requerida' });
+
+  const kind = detectPlatform(url);
+
+  // ── Spotify playlist/album ─────────────────────────────────────────────────
+  if (kind === 'spotify-playlist' || kind === 'spotify-album') {
+    const tracks = await spotifyPlaylistTracks(url);
+    if (tracks.length === 0) return res.status(500).json({ error: 'No se pudieron extraer tracks de Spotify. Asegúrate de que la playlist sea pública.' });
+    return res.json({ platform: 'Spotify', type: kind, tracks, total: tracks.length });
+  }
+
+  // ── YouTube / SoundCloud / generic playlists via yt-dlp ───────────────────
+  const proc = spawn(YTDLP, [
+    url,
+    '--flat-playlist',
+    '--dump-json',
+    '--yes-playlist',
+    '--skip-download',
+    ...YTDLP_BASE,
+  ]);
+
+  const tracks = [];
+  let buf = '', err = '';
+
+  proc.stdout.on('data', d => {
+    buf += d.toString();
+    const lines = buf.split('\n');
+    buf = lines.pop(); // keep incomplete last line
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const item = JSON.parse(line);
+        tracks.push({
+          title:       item.title || item.id || 'Unknown',
+          artist:      item.uploader || item.channel || item.creator || '',
+          thumbnail:   item.thumbnail || (item.thumbnails?.[0]?.url) || '',
+          url:         item.url || item.webpage_url || url,
+          duration:    item.duration,
+          platform:    item.extractor_key || item.ie_key || 'Unknown',
+          isSpotify:   false,
+        });
+      } catch {}
     }
   });
+  proc.stderr.on('data', d => err += d);
+  proc.on('close', code => {
+    if (tracks.length === 0) return res.status(500).json({ error: 'No se encontraron tracks en la playlist', details: err.slice(0, 300) });
+    res.json({ platform: tracks[0]?.platform || 'Unknown', type: kind, tracks, total: tracks.length });
+  });
 });
 
-// ─── ROUTE: STREAM PREVIEW ───────────────────────────────────────────────────
+// ─── ROUTE: STREAM DOWNLOAD ───────────────────────────────────────────────────
+app.get('/api/stream', (req, res) => {
+  const { url, format = 'mp3', title = 'track' } = req.query;
+  if (!url) return res.status(400).send('URL requerida');
 
-app.get('/api/stream-preview', (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).send('URL required');
+  const decoded = decodeURIComponent(url);
+  const fmt     = FORMATS[format] || FORMATS.mp3;
+  const safe    = sanitize(decodeURIComponent(title));
 
-  res.setHeader('Content-Type', 'audio/mpeg');
+  // Spotify track → search YouTube
+  const actualUrl = decoded.startsWith('SEARCH:')
+    ? `ytsearch1:${decoded.slice(7)}`
+    : decoded;
+
+  res.setHeader('Content-Disposition', `attachment; filename="${safe}.${fmt.ext}"`);
+  res.setHeader('Content-Type', fmt.mime);
   res.setHeader('Transfer-Encoding', 'chunked');
 
-  const ytArgs = [url, '-x', '--audio-format', 'mp3', '--audio-quality', '5', '-o', '-', '--no-playlist', '--quiet'];
-  const proc = spawn(YTDLP, ytArgs);
+  const args = [
+    actualUrl,
+    '-x',
+    '--audio-format', fmt.codec,
+    '--audio-quality', '0',
+    '-o', '-',
+    '--no-playlist',
+    ...YTDLP_BASE,
+    // Best audio source selection
+    '-f', 'bestaudio/best',
+  ];
 
+  // Force 320kbps + 44.1kHz for MP3
+  if (fmt.postArgs.length) {
+    args.push('--postprocessor-args', ...fmt.postArgs);
+  }
+
+  const proc = spawn(YTDLP, args);
   proc.stdout.pipe(res);
-  proc.stderr.on('data', () => {});
-  proc.on('close', () => { try { res.end(); } catch {} });
-  req.on('close', () => { proc.kill(); });
-});
-
-// ─── ROUTE: LIST DOWNLOADS ───────────────────────────────────────────────────
-
-app.get('/api/downloads', (req, res) => {
-  try {
-    const files = fs.readdirSync(DOWNLOADS_DIR).map(f => {
-      const fpath = path.join(DOWNLOADS_DIR, f);
-      const stat = fs.statSync(fpath);
-      return { name: f, size: stat.size, created: stat.birthtime };
-    }).sort((a, b) => b.created - a.created);
-    res.json(files);
-  } catch {
-    res.json([]);
-  }
-});
-
-// ─── ROUTE: SERVE DOWNLOADED FILE ────────────────────────────────────────────
-
-app.get('/api/file/:filename', (req, res) => {
-  const filePath = path.join(DOWNLOADS_DIR, req.params.filename);
-  if (!fs.existsSync(filePath)) return res.status(404).send('Not found');
-  res.download(filePath);
-});
-
-// ─── ROUTE: TEST ACR CREDENTIALS ─────────────────────────────────────────────
-
-app.post('/api/test-acr', async (req, res) => {
-  const { acrHost, acrKey, acrSecret } = req.body;
-  if (!acrHost || !acrKey || !acrSecret) return res.json({ ok: false, error: 'Credenciales incompletas' });
-
-  const crypto = require('crypto');
-  const https  = require('https');
-  const querystring = require('querystring');
-
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const httpMethod = 'POST';
-  const httpUri    = '/v1/identify';
-  const dataType   = 'audio';
-  const signVersion = '1';
-
-  const stringToSign = [httpMethod, httpUri, acrKey, dataType, signVersion, timestamp].join('\n');
-  const sign = crypto.createHmac('sha1', acrSecret).update(stringToSign).digest('base64');
-
-  // Send a tiny silent audio sample (1 byte — will get "no result" but proves auth works)
-  const silentAudio = Buffer.alloc(100, 0);
-  const boundary = 'TestBoundary';
-  let body = '';
-  const fields = { access_key: acrKey, sample_bytes: String(silentAudio.length), timestamp, signature: sign, data_type: dataType, signature_version: signVersion };
-
-  let bodyBuf = Buffer.alloc(0);
-  for (const [k, v] of Object.entries(fields)) {
-    bodyBuf = Buffer.concat([bodyBuf, Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`)]);
-  }
-  bodyBuf = Buffer.concat([bodyBuf, Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="sample"; filename="test.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`), silentAudio, Buffer.from(`\r\n--${boundary}--\r\n`)]);
-
-  const options = {
-    hostname: acrHost, method: 'POST', path: httpUri,
-    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length }
-  };
-
-  const request = https.request(options, (response) => {
-    let data = '';
-    response.on('data', c => data += c);
-    response.on('end', () => {
-      try {
-        const json = JSON.parse(data);
-        // code 0 = match, 1001 = no result (both mean auth is OK), 3003 = auth error
-        const code = json.status?.code;
-        if (code === 0 || code === 1001) {
-          res.json({ ok: true });
-        } else {
-          res.json({ ok: false, error: json.status?.msg || 'Auth failed' });
-        }
-      } catch {
-        res.json({ ok: false, error: 'Parse error' });
-      }
-    });
+  proc.stderr.on('data', d => {
+    const l = d.toString().trim();
+    if (l && !l.startsWith('[download]')) console.log('[yt-dlp]', l);
   });
-  request.on('error', (e) => res.json({ ok: false, error: e.message }));
-  request.write(bodyBuf);
-  request.end();
+  proc.on('close', () => { try { res.end(); } catch {} });
+  proc.on('error', e => { console.error(e); try { res.end(); } catch {} });
+  req.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
+});
+
+// ─── ROUTE: BATCH INFO (multiple individual URLs) ─────────────────────────────
+app.post('/api/batch-info', async (req, res) => {
+  const { urls } = req.body;
+  if (!Array.isArray(urls) || !urls.length) return res.status(400).json({ error: 'URLs requeridas' });
+
+  const results = [];
+
+  for (const url of urls.slice(0, 20)) {
+    await new Promise(resolve => {
+      if (detectPlatform(url) === 'spotify-track') {
+        spotifyOembed(url).then(info => {
+          results.push(info
+            ? { url, title: info.title, platform: 'Spotify', thumbnail: info.thumbnail_url, isSpotify: true, searchQuery: info.title }
+            : { url, error: 'No se pudo obtener info' });
+          resolve();
+        });
+        return;
+      }
+      const proc = spawn(YTDLP, [url, '--dump-json', '--no-playlist', '--skip-download', ...YTDLP_BASE]);
+      let out = '', err = '';
+      proc.stdout.on('data', d => out += d);
+      proc.stderr.on('data', d => err += d);
+      proc.on('close', code => {
+        if (code !== 0) { results.push({ url, error: 'No se pudo obtener info' }); resolve(); return; }
+        try {
+          const info = JSON.parse(out.trim().split('\n')[0]);
+          results.push({ url, title: info.title, uploader: info.uploader || info.channel || '', platform: info.extractor_key || 'Unknown', thumbnail: info.thumbnail, duration: info.duration, isSpotify: false });
+        } catch { results.push({ url, error: 'Error al parsear' }); }
+        resolve();
+      });
+    });
+  }
+
+  res.json(results);
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
-
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`\n🎧 DJTool Server running at http://localhost:${PORT}\n`);
-});
+server.listen(PORT, () => console.log(`\n🎧 DJDownloader → http://localhost:${PORT}\n`));

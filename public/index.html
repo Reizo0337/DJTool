@@ -3,16 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DJTool — Track Detector & Downloader</title>
-  <meta name="description" content="Detecta los tracks en sesiones de DJ de YouTube y SoundCloud. Descarga música a máxima calidad." />
+  <title>DJDownloader — Descarga música para DJs</title>
+  <meta name="description" content="Descarga música de YouTube, Spotify, SoundCloud y más. MP3 320kbps, WAV, AIFF y FLAC. Optimizado para Rekordbox." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
-  <!-- Background -->
   <div class="bg-orbs">
     <div class="orb orb-1"></div>
     <div class="orb orb-2"></div>
@@ -23,320 +21,169 @@
   <header class="header">
     <div class="logo">
       <div class="logo-icon">
-        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="12" cy="12" r="3" fill="currentColor"/>
-          <path d="M12 2C12 2 16 6 16 12C16 18 12 22 12 22" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
-          <path d="M12 2C12 2 8 6 8 12C8 18 12 22 12 22" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
-          <path d="M2 12H22" stroke="currentColor" stroke-width="1.5" opacity="0.4"/>
+        <svg viewBox="0 0 32 32" fill="none">
+          <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="16" cy="16" r="4" fill="currentColor"/>
+          <circle cx="16" cy="16" r="8" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
         </svg>
       </div>
-      <span class="logo-text">DJ<span class="logo-accent">Tool</span></span>
+      <div class="logo-text">DJ<span class="accent">Downloader</span></div>
     </div>
-    <nav class="nav">
-      <button class="nav-btn active" id="nav-detect" onclick="switchMode('detect')">
-        <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2"/><path d="m21 21-4.35-4.35" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        Detectar
-      </button>
-      <button class="nav-btn" id="nav-download" onclick="switchMode('download')">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        Descargar
-      </button>
-      <button class="nav-btn" id="nav-settings" onclick="switchMode('settings')">
-        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" stroke-width="2"/></svg>
-        Ajustes
-      </button>
-    </nav>
-    <div class="status-dot" id="status-dot" title="Servidor conectado"></div>
+    <div class="header-right">
+      <div class="platform-chips">
+        <span class="chip">YouTube</span>
+        <span class="chip">Spotify</span>
+        <span class="chip">SoundCloud</span>
+        <span class="chip chip-more">+1000</span>
+      </div>
+      <div class="status-pill" id="status-pill">
+        <span class="status-dot"></span>
+        <span id="status-text">Conectando...</span>
+      </div>
+    </div>
   </header>
 
   <main class="main">
 
-    <!-- ═══════════════ MODE: DETECT ═══════════════ -->
-    <section class="mode-section active" id="mode-detect">
-      <div class="section-hero">
-        <h1 class="section-title">Detectar Tracks</h1>
-        <p class="section-subtitle">Pega el enlace de una sesión de DJ en YouTube o SoundCloud y detectaré todos los tracks automáticamente</p>
-      </div>
+    <!-- Hero -->
+    <div class="hero">
+      <h1 class="hero-title">Descarga música<br/><span class="hero-gradient">donde quieras</span></h1>
+      <p class="hero-sub">YouTube · Spotify · SoundCloud · Bandcamp · Mixcloud · Beatport y más<br/>MP3 320kbps · WAV · AIFF · FLAC — 100% compatible con Rekordbox</p>
+    </div>
 
-      <div class="input-card">
-        <div class="input-group">
-          <div class="input-icon">
+    <!-- Main Input Card -->
+    <div class="main-card" id="main-card">
+
+      <!-- URL Input -->
+      <div class="url-section">
+        <div class="url-input-wrap" id="url-input-wrap">
+          <div class="url-icon">
             <svg viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           </div>
-          <input
-            type="url"
-            id="detect-url"
-            class="url-input"
-            placeholder="https://youtube.com/watch?v=... o https://soundcloud.com/..."
+          <textarea
+            id="url-input"
+            class="url-textarea"
+            placeholder="Pega aquí uno o varios enlaces&#10;https://open.spotify.com/track/...&#10;https://youtube.com/watch?v=...&#10;https://soundcloud.com/..."
+            rows="1"
             autocomplete="off"
-          />
-          <button class="btn-primary" id="detect-btn" onclick="startAnalysis()">
-            <span class="btn-text">Analizar</span>
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none"><path d="m9 18 6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            spellcheck="false"
+          ></textarea>
+          <button class="search-btn" id="search-btn" onclick="handleSearch()">
+            <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2.5"/><path d="m21 21-4.35-4.35" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
           </button>
         </div>
 
-        <div class="url-hints">
-          <span class="hint">✓ YouTube</span>
-          <span class="hint">✓ SoundCloud</span>
-          <span class="hint">✓ Mixcloud</span>
-          <span class="hint">✓ Twitch VODs</span>
+        <!-- Format Bar -->
+        <div class="format-bar">
+          <span class="format-label">Formato:</span>
+          <div class="format-pills">
+            <label class="fpill active">
+              <input type="radio" name="fmt" value="mp3" checked />
+              <span>MP3 <em>320k</em></span>
+            </label>
+            <label class="fpill">
+              <input type="radio" name="fmt" value="wav" />
+              <span>WAV</span>
+            </label>
+            <label class="fpill">
+              <input type="radio" name="fmt" value="aiff" />
+              <span>AIFF</span>
+            </label>
+            <label class="fpill">
+              <input type="radio" name="fmt" value="flac" />
+              <span>FLAC</span>
+            </label>
+          </div>
+          <span class="rekordbox-badge">✓ Rekordbox</span>
         </div>
       </div>
 
-      <!-- Progress Section -->
-      <div class="progress-card hidden" id="detect-progress">
-        <div class="progress-stages" id="progress-stages">
-          <div class="stage" id="stage-downloading">
-            <div class="stage-dot"></div>
-            <span>Descargando</span>
+      <!-- Track Preview (single) -->
+      <div class="preview-section hidden" id="preview-section">
+        <div class="preview-card" id="preview-card">
+          <div class="preview-thumb-wrap">
+            <img class="preview-thumb" id="preview-thumb" src="" alt="" />
+            <div class="preview-thumb-placeholder hidden" id="preview-thumb-placeholder">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="18" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
+            </div>
           </div>
-          <div class="stage-line"></div>
-          <div class="stage" id="stage-analyzing">
-            <div class="stage-dot"></div>
-            <span>Analizando</span>
+          <div class="preview-info">
+            <div class="preview-platform-badge" id="preview-platform">—</div>
+            <div class="preview-title" id="preview-title">—</div>
+            <div class="preview-artist" id="preview-artist">—</div>
+            <div class="preview-duration" id="preview-duration"></div>
           </div>
-          <div class="stage-line"></div>
-          <div class="stage" id="stage-done">
-            <div class="stage-dot"></div>
-            <span>Completado</span>
-          </div>
-        </div>
-        <div class="progress-bar-wrap">
-          <div class="progress-bar" id="progress-bar"></div>
-        </div>
-        <p class="progress-msg" id="progress-msg">Iniciando...</p>
-        <div class="waveform-anim" id="waveform-anim">
-          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
-          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
-          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
-          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
-          <div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div>
-        </div>
-      </div>
-
-      <!-- Results Table -->
-      <div class="results-section hidden" id="detect-results">
-        <div class="results-header">
-          <h2 class="results-title" id="results-count">Tracks Detectados</h2>
-          <div class="results-actions">
-            <button class="btn-ghost" onclick="exportTracklist()">
-              <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2"/><polyline points="17 8 12 3 7 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-              Exportar
-            </button>
-            <button class="btn-ghost" onclick="copyTracklist()">
-              <svg viewBox="0 0 24 24" fill="none"><rect x="9" y="9" width="13" height="13" rx="2" stroke="currentColor" stroke-width="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" stroke="currentColor" stroke-width="2"/></svg>
-              Copiar
+          <div class="preview-actions">
+            <button class="dl-btn" id="dl-btn" onclick="downloadSingle()">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
+              Descargar
             </button>
           </div>
         </div>
-        <div class="tracks-grid" id="tracks-grid"></div>
-      </div>
-    </section>
-
-    <!-- ═══════════════ MODE: DOWNLOAD ═══════════════ -->
-    <section class="mode-section" id="mode-download">
-      <div class="section-hero">
-        <h1 class="section-title">Descargar Tracks</h1>
-        <p class="section-subtitle">Descarga cualquier track de YouTube o SoundCloud a la máxima calidad disponible</p>
-      </div>
-
-      <div class="input-card">
-        <div class="input-group">
-          <div class="input-icon">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <!-- Download Progress -->
+        <div class="dl-progress hidden" id="dl-progress">
+          <div class="dl-progress-track">
+            <div class="dl-progress-fill" id="dl-progress-fill"></div>
           </div>
-          <input
-            type="url"
-            id="download-url"
-            class="url-input"
-            placeholder="https://youtube.com/watch?v=... o https://soundcloud.com/..."
-            autocomplete="off"
-          />
-          <button class="btn-secondary" id="info-btn" onclick="fetchTrackInfo()">
-            <span class="btn-text">Buscar</span>
-            <svg class="btn-icon" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2"/><path d="m21 21-4.35-4.35" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          </button>
+          <div class="dl-progress-msg" id="dl-progress-msg">Preparando...</div>
         </div>
       </div>
 
-      <!-- Track Preview Card -->
-      <div class="track-preview-card hidden" id="track-preview-card">
-        <div class="preview-artwork" id="preview-artwork">
-          <div class="artwork-placeholder">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="1.5"/><circle cx="6" cy="18" r="3" stroke="currentColor" stroke-width="1.5"/><circle cx="18" cy="16" r="3" stroke="currentColor" stroke-width="1.5"/></svg>
-          </div>
-          <img id="preview-img" src="" alt="" class="artwork-img hidden" />
-          <div class="play-overlay" onclick="togglePreview()" id="play-overlay">
-            <div class="play-btn" id="play-btn-icon">
-              <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            </div>
-          </div>
-        </div>
-        <div class="preview-info">
-          <div class="preview-meta">
-            <div class="preview-platform" id="preview-platform">YouTube</div>
-            <h3 class="preview-title" id="preview-title">—</h3>
-            <p class="preview-artist" id="preview-artist">—</p>
-            <div class="preview-stats">
-              <span id="preview-duration">—</span>
-              <span class="dot">·</span>
-              <span id="preview-views">—</span>
-            </div>
-          </div>
-
-          <div class="format-selector">
-            <p class="format-label">Formato de descarga</p>
-            <div class="format-options">
-              <label class="format-opt" id="fmt-best">
-                <input type="radio" name="format" value="best" checked />
-                <div class="fmt-card">
-                  <div class="fmt-icon">⚡</div>
-                  <div class="fmt-info">
-                    <div class="fmt-name">Original</div>
-                    <div class="fmt-desc">Máxima calidad sin re-encode</div>
-                  </div>
-                  <div class="fmt-badge">BEST</div>
-                </div>
-              </label>
-              <label class="format-opt" id="fmt-mp3">
-                <input type="radio" name="format" value="mp3" />
-                <div class="fmt-card">
-                  <div class="fmt-icon">🎵</div>
-                  <div class="fmt-info">
-                    <div class="fmt-name">MP3 320kbps</div>
-                    <div class="fmt-desc">Compatible con todo</div>
-                  </div>
-                  <div class="fmt-badge">MP3</div>
-                </div>
-              </label>
-              <label class="format-opt" id="fmt-wav">
-                <input type="radio" name="format" value="wav" />
-                <div class="fmt-card">
-                  <div class="fmt-icon">🎚️</div>
-                  <div class="fmt-info">
-                    <div class="fmt-name">WAV</div>
-                    <div class="fmt-desc">Lossless, para DJs</div>
-                  </div>
-                  <div class="fmt-badge">WAV</div>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          <button class="btn-download" id="download-btn" onclick="downloadTrack()">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-            Descargar
-          </button>
-
-          <!-- Download Progress -->
-          <div class="download-progress hidden" id="dl-progress">
-            <div class="dl-progress-bar-wrap">
-              <div class="dl-progress-bar" id="dl-progress-bar"></div>
-            </div>
-            <p class="dl-progress-msg" id="dl-progress-msg">Preparando descarga...</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- Downloads Library -->
-      <div class="downloads-library">
-        <div class="library-header">
-          <h2 class="library-title">Biblioteca de Descargas</h2>
-          <button class="btn-ghost small" onclick="refreshDownloads()">
-            <svg viewBox="0 0 24 24" fill="none"><polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="1 20 1 14 7 14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            Actualizar
-          </button>
-        </div>
-        <div class="downloads-list" id="downloads-list">
-          <div class="empty-state">
-            <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="1.5"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
-            <p>Aún no hay descargas</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ═══════════════ MODE: SETTINGS ═══════════════ -->
-    <section class="mode-section" id="mode-settings">
-      <div class="section-hero">
-        <h1 class="section-title">Configuración</h1>
-        <p class="section-subtitle">Configura tus credenciales de ACRCloud para el reconocimiento de audio</p>
-      </div>
-
-      <div class="settings-card">
-        <div class="settings-section">
-          <div class="settings-header">
-            <div class="settings-icon">🎯</div>
-            <div>
-              <h3 class="settings-title">ACRCloud API</h3>
-              <p class="settings-desc">Necesitas una cuenta gratuita en <a href="https://console.acrcloud.com" target="_blank" class="link">console.acrcloud.com</a> — 14 días gratis, sin tarjeta</p>
-            </div>
-          </div>
-
-          <div class="settings-fields">
-            <div class="field-group">
-              <label class="field-label" for="acr-host">Host</label>
-              <input type="text" id="acr-host" class="field-input" placeholder="identify-eu-west-1.acrcloud.com" />
-            </div>
-            <div class="field-group">
-              <label class="field-label" for="acr-key">Access Key</label>
-              <input type="text" id="acr-key" class="field-input" placeholder="Tu Access Key de ACRCloud" />
-            </div>
-            <div class="field-group">
-              <label class="field-label" for="acr-secret">Access Secret</label>
-              <input type="password" id="acr-secret" class="field-input" placeholder="Tu Access Secret de ACRCloud" />
-              <button class="field-toggle" onclick="toggleSecret()" title="Mostrar/ocultar">
-                <svg viewBox="0 0 24 24" fill="none"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/></svg>
-              </button>
-            </div>
-            <div class="field-group">
-              <label class="field-label" for="chunk-seconds">Duración de fragmento (segundos)</label>
-              <input type="number" id="chunk-seconds" class="field-input" placeholder="20" min="10" max="60" value="20" />
-              <span class="field-hint">Fragmentos más cortos = más preciso pero más lento</span>
-            </div>
-          </div>
-
-          <div class="settings-actions">
-            <button class="btn-primary" onclick="saveSettings()">
-              <svg viewBox="0 0 24 24" fill="none"><polyline points="20 6 9 17 4 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              Guardar
+      <!-- Batch Queue -->
+      <div class="batch-section hidden" id="batch-section">
+        <div class="batch-header">
+          <span class="batch-title" id="batch-count">0 tracks</span>
+          <div class="batch-actions">
+            <button class="btn-ghost-sm" onclick="downloadAll()">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              Descargar todo
             </button>
-            <button class="btn-ghost" id="test-btn" onclick="testConnection()">
-              <svg viewBox="0 0 24 24" fill="none"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-              Probar conexión
+            <button class="btn-ghost-sm danger" onclick="clearBatch()">
+              <svg viewBox="0 0 24 24" fill="none"><polyline points="3 6 5 6 21 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              Limpiar
             </button>
           </div>
-
-          <div class="test-result hidden" id="test-result"></div>
         </div>
+        <div class="batch-list" id="batch-list"></div>
+      </div>
 
-        <div class="settings-section info-section">
-          <div class="settings-header">
-            <div class="settings-icon">📖</div>
-            <div>
-              <h3 class="settings-title">Cómo obtener las credenciales</h3>
-            </div>
-          </div>
-          <ol class="steps-list">
-            <li>Ve a <a href="https://console.acrcloud.com" target="_blank" class="link">console.acrcloud.com</a> y crea una cuenta</li>
-            <li>Crea un nuevo proyecto de tipo <strong>"Audio & Video Recognition"</strong></li>
-            <li>Conecta el bucket <strong>"ACRCloud Music"</strong></li>
-            <li>Copia el <strong>Host</strong>, <strong>Access Key</strong> y <strong>Access Secret</strong></li>
-            <li>Pégalos aquí y pulsa Guardar</li>
-          </ol>
+    </div><!-- /main-card -->
+
+    <!-- Platforms Section -->
+    <div class="platforms-section">
+      <p class="platforms-label">Plataformas soportadas</p>
+      <div class="platforms-grid">
+        <div class="platform-card">
+          <div class="platform-icon yt">▶</div>
+          <span>YouTube</span>
+        </div>
+        <div class="platform-card">
+          <div class="platform-icon sp">♫</div>
+          <span>Spotify</span>
+        </div>
+        <div class="platform-card">
+          <div class="platform-icon sc">☁</div>
+          <span>SoundCloud</span>
+        </div>
+        <div class="platform-card">
+          <div class="platform-icon bc">⬡</div>
+          <span>Bandcamp</span>
+        </div>
+        <div class="platform-card">
+          <div class="platform-icon mx">◉</div>
+          <span>Mixcloud</span>
+        </div>
+        <div class="platform-card">
+          <div class="platform-icon more">∞</div>
+          <span>+1000 más</span>
         </div>
       </div>
-    </section>
+    </div>
 
   </main>
 
-  <!-- Audio element for preview -->
-  <audio id="preview-audio" preload="none"></audio>
-
-  <!-- Toast notification -->
-  <div class="toast hidden" id="toast"></div>
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
 
   <script src="app.js"></script>
 </body>
