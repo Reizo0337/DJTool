@@ -9,7 +9,7 @@
     "downloads"
   ],
   "host_permissions": [
-    "http://localhost:3000/*",
+    "http://localhost:48321/*",
     "https://*.spotify.com/*",
     "https://*.youtube.com/*",
     "https://*.soundcloud.com/*"

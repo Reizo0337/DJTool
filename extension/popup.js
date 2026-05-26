@@ -1,7 +1,7 @@
 // DJDownloader Companion — Popup Script
 
 let activeTrack = null;
-let currentServerUrl = 'http://localhost:3000';
+let currentServerUrl = 'http://localhost:48321';
 let preferredFormat = 'mp3';
 
 document.addEventListener('DOMContentLoaded', async () => {

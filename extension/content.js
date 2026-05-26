@@ -383,7 +383,7 @@
     }
 
     chrome.storage.local.get(['serverUrl', 'format'], async (items) => {
-      const serverUrl = (items.serverUrl || 'http://localhost:3000').replace(/\/$/, '');
+      const serverUrl = (items.serverUrl || 'http://localhost:48321').replace(/\/$/, '');
       const format = items.format || 'mp3';
 
       try {
