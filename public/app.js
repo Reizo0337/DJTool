@@ -118,36 +118,121 @@ function showSinglePreview(info) {
   resetDlBtn();
 }
 
-// ─── PLAYLIST ─────────────────────────────────────────────────────────────────
+// ─── PLAYLIST (Streaming) ───────────────────────────────────────────────────────
 async function handlePlaylist(url) {
   hideSections();
-  showToast('🔍 Cargando playlist...', '');
+  showToast('🔍 Buscando playlist...', '');
+  
+  // Clear batch list initially
+  batchItems = [];
+  document.getElementById('batch-list').innerHTML = '';
+  document.getElementById('batch-count').textContent = '0 seleccionados';
+  document.getElementById('batch-section').classList.remove('hidden');
 
   try {
     const resp = await fetch(`${API}/api/playlist-info`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url })
     });
-    const data = await resp.json();
-    if (data.error) throw new Error(data.error);
-    if (!data.tracks?.length) throw new Error('No se encontraron tracks');
-
-    batchItems = data.tracks.map(t => ({
-      title:       t.title || 'Unknown',
-      artist:      t.artist || t.uploader || '',
-      thumbnail:   t.thumbnail || '',
-      url:         t.url || url,
-      isSpotify:   t.isSpotify || isSpotifyUrl(t.url || url),
-      searchQuery: t.searchQuery || `${t.artist || ''} ${t.title || ''}`.trim(),
-      duration:    t.duration,
-      status:      'pending',
-      checked:     true,
-    }));
-
-    showBatch(`${data.platform} · ${data.tracks.length} tracks`);
-    showToast(`✅ ${data.tracks.length} tracks encontrados`, 'ok');
+    
+    if (!resp.ok) throw new Error('Error al conectar');
+    
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+      
+      for (const p of parts) {
+        if (p.startsWith('event: end')) {
+           showToast(`✅ ${batchItems.length} tracks cargados`, 'ok');
+           return;
+        }
+        if (p.startsWith('event: meta')) {
+           const meta = JSON.parse(p.substring(12));
+           showToast(`Cargando playlist: ${meta.platform}`, '');
+        }
+        if (p.startsWith('event: error')) {
+           const err = JSON.parse(p.substring(13));
+           showToast(`❌ ${err.error}`, 'err');
+           return;
+        }
+        if (p.startsWith('data: ')) {
+           const t = JSON.parse(p.substring(6));
+           const item = {
+             title:       t.title || 'Unknown',
+             artist:      t.artist || t.uploader || '',
+             thumbnail:   t.thumbnail || '',
+             url:         t.url || url,
+             isSpotify:   t.isSpotify || isSpotifyUrl(t.url || url),
+             searchQuery: t.searchQuery || `${t.artist || ''} ${t.title || ''}`.trim(),
+             duration:    t.duration,
+             status:      'pending',
+             checked:     true,
+           };
+           batchItems.push(item);
+           appendBatchItem(item, batchItems.length - 1);
+        }
+      }
+    }
   } catch (e) {
     showToast('❌ ' + e.message, 'err');
+  }
+}
+
+// ─── AUDIO PREVIEW ────────────────────────────────────────────────────────────
+let previewAudio = new Audio();
+let currentPlayingIdx = -1;
+
+function togglePreview(idx) {
+  const item = batchItems[idx];
+  if (!item) return;
+  
+  if (currentPlayingIdx === idx && !previewAudio.paused) {
+    // Pause
+    previewAudio.pause();
+    updatePlayBtn(idx, false);
+    return;
+  }
+  
+  // Pause any existing
+  if (currentPlayingIdx !== -1) {
+    updatePlayBtn(currentPlayingIdx, false);
+  }
+  
+  let streamUrl = '';
+  if (item.isSpotify || isSpotifyUrl(item.url)) {
+    streamUrl = `${API}/api/preview?url=${encodeURIComponent('SEARCH:' + item.searchQuery)}`;
+  } else {
+    streamUrl = `${API}/api/preview?url=${encodeURIComponent(item.url)}`;
+  }
+  
+  previewAudio.src = streamUrl;
+  previewAudio.play().catch(() => showToast('Error al reproducir audio', 'err'));
+  currentPlayingIdx = idx;
+  updatePlayBtn(idx, true);
+}
+
+previewAudio.onended = () => {
+  if (currentPlayingIdx !== -1) updatePlayBtn(currentPlayingIdx, false);
+  currentPlayingIdx = -1;
+};
+
+function updatePlayBtn(idx, isPlaying) {
+  const el = document.getElementById(`play-btn-${idx}`);
+  if (!el) return;
+  if (isPlaying) {
+    el.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><rect x="6" y="4" width="4" height="16" fill="currentColor"/><rect x="14" y="4" width="4" height="16" fill="currentColor"/></svg>`;
+    el.classList.add('playing');
+  } else {
+    el.innerHTML = `<svg viewBox="0 0 24 24" fill="none"><path d="M5 3l14 9-14 9v-18z" fill="currentColor"/></svg>`;
+    el.classList.remove('playing');
   }
 }
 
@@ -195,36 +280,49 @@ function renderBatch() {
   document.getElementById('batch-count').textContent = `${checked} / ${batchItems.length} seleccionados`;
 
   batchItems.forEach((item, idx) => {
-    const div = document.createElement('div');
-    div.className = `batch-item ${item.status}`;
-    div.style.animationDelay = `${idx * 0.03}s`;
-    div.id = `batch-item-${idx}`;
-
-    const thumbHtml = item.thumbnail
-      ? `<img class="batch-thumb" src="${escHtml(item.thumbnail)}" alt="" onerror="this.style.display='none'">`
-      : `<div class="batch-thumb-placeholder">♪</div>`;
-
-    const statusText = { pending: '—', active: '⏬ Descargando', done: '✓ Listo', error: '✕ Error' }[item.status] || '—';
-    const dur = item.duration ? fmtTime(item.duration) : '';
-
-    div.innerHTML = `
-      <input type="checkbox" class="batch-check" ${item.checked ? 'checked' : ''} onchange="toggleCheck(${idx}, this.checked)" />
-      ${thumbHtml}
-      <div class="batch-info">
-        <div class="batch-title-text">${escHtml(item.title)}</div>
-        ${item.artist ? `<div class="batch-artist-text">${escHtml(item.artist)}</div>` : ''}
-        ${dur ? `<div class="batch-duration">${dur}</div>` : ''}
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
-        <span class="batch-status ${item.status}">${statusText}</span>
-        ${item.status !== 'active' ? `
-        <button class="batch-dl-btn" title="Descargar este track" onclick="downloadOne(${idx})">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-        </button>` : ''}
-      </div>
-    `;
-    list.appendChild(div);
+    appendBatchItem(item, idx);
   });
+}
+
+function appendBatchItem(item, idx) {
+  const list = document.getElementById('batch-list');
+  const div = document.createElement('div');
+  div.className = `batch-item ${item.status}`;
+  div.id = `batch-item-${idx}`;
+
+  const thumbHtml = item.thumbnail
+    ? `<img class="batch-thumb" src="${escHtml(item.thumbnail)}" alt="" onerror="this.style.display='none'">`
+    : `<div class="batch-thumb-placeholder">♪</div>`;
+
+  const statusText = { pending: '—', active: '⏬ Descargando', done: '✓ Listo', error: '✕ Error' }[item.status] || '—';
+  const dur = item.duration ? fmtTime(item.duration) : '';
+
+  div.innerHTML = `
+    <input type="checkbox" class="batch-check" ${item.checked ? 'checked' : ''} onchange="toggleCheck(${idx}, this.checked)" />
+    <div class="thumb-wrapper">
+       ${thumbHtml}
+       <button class="play-overlay" id="play-btn-${idx}" onclick="togglePreview(${idx})" title="Escuchar preview">
+          <svg viewBox="0 0 24 24" fill="none"><path d="M5 3l14 9-14 9v-18z" fill="currentColor"/></svg>
+       </button>
+    </div>
+    <div class="batch-info">
+      <div class="batch-title-text">${escHtml(item.title)}</div>
+      ${item.artist ? `<div class="batch-artist-text">${escHtml(item.artist)}</div>` : ''}
+      ${dur ? `<div class="batch-duration">${dur}</div>` : ''}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="batch-status ${item.status}">${statusText}</span>
+      ${item.status !== 'active' ? `
+      <button class="batch-dl-btn" title="Descargar este track" onclick="downloadOne(${idx})">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>` : ''}
+    </div>
+  `;
+  list.appendChild(div);
+  
+  // Update count dynamically
+  const checked = batchItems.filter(i => i.checked).length;
+  document.getElementById('batch-count').textContent = `${checked} seleccionados`;
 }
 
 function toggleCheck(idx, val) {
@@ -258,31 +356,53 @@ function downloadOne(idx) {
   setTimeout(() => setBatchStatus(idx, 'done'), 3500);
 }
 
-// ─── DOWNLOAD ALL (sequential) ────────────────────────────────────────────────
-async function downloadAll() {
-  const selected = batchItems.map((item, idx) => ({ item, idx })).filter(e => e.item.checked && e.item.status !== 'done');
+// ─── DOWNLOAD ALL (ZIP Streaming) ─────────────────────────────────────────────
+async function downloadAllZip() {
+  const selected = batchItems.filter(i => i.checked && i.status !== 'done');
   if (!selected.length) { showToast('No hay tracks seleccionados', 'err'); return; }
-  if (isDownloading) { showToast('Ya hay una descarga en progreso', ''); return; }
-
-  isDownloading = true;
-  showToast(`⬇️ Descargando ${selected.length} tracks...`, 'ok');
-
+  
   const fmt = getFormat();
-  let done = 0;
-
-  for (const { item, idx } of selected) {
-    setBatchStatus(idx, 'active');
-    const dlUrl = buildStreamUrl(item, fmt);
-    triggerDownload(dlUrl, item.title + '.' + fmt);
-    // Wait between downloads to not overwhelm browser
-    await sleep(2800);
-    setBatchStatus(idx, 'done');
-    done++;
-    showToast(`⬇️ ${done}/${selected.length} — ${item.title}`, 'ok');
-  }
-
-  isDownloading = false;
-  showToast(`✅ ${done} tracks descargados`, 'ok');
+  const tracksPayload = selected.map(item => {
+    return {
+      title: item.title,
+      url: item.isSpotify ? `SEARCH:${item.searchQuery}` : item.url
+    };
+  });
+  
+  showToast(`⬇️ Solicitando ZIP de ${selected.length} tracks...`, 'ok');
+  
+  // We must trigger this as a standard form submit so the browser handles the ZIP stream natively
+  // without us having to buffer it in memory using fetch.
+  
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = `${API}/api/download-zip`;
+  form.style.display = 'none';
+  
+  const inputTracks = document.createElement('input');
+  inputTracks.type = 'hidden';
+  inputTracks.name = 'tracks';
+  inputTracks.value = JSON.stringify(tracksPayload);
+  form.appendChild(inputTracks);
+  
+  const inputFormat = document.createElement('input');
+  inputFormat.type = 'hidden';
+  inputFormat.name = 'format';
+  inputFormat.value = fmt;
+  form.appendChild(inputFormat);
+  
+  document.body.appendChild(form);
+  form.submit();
+  document.body.removeChild(form);
+  
+  showToast('✅ ZIP generándose... empezará a descargar pronto', 'ok');
+  
+  // Mark all as active/done for UI purposes
+  batchItems.forEach((item, idx) => {
+    if (item.checked && item.status !== 'done') {
+      setBatchStatus(idx, 'done');
+    }
+  });
 }
 
 function clearBatch() {

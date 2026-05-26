@@ -7,6 +7,7 @@ const fs        = require('fs');
 const http      = require('http');
 const https     = require('https');
 const WebSocket = require('ws');
+const archiver  = require('archiver');
 
 const app    = express();
 const server = http.createServer(app);
@@ -172,10 +173,27 @@ app.post('/api/playlist-info', async (req, res) => {
   if (kind === 'spotify-playlist' || kind === 'spotify-album') {
     const tracks = await spotifyPlaylistTracks(url);
     if (tracks.length === 0) return res.status(500).json({ error: 'No se pudieron extraer tracks de Spotify. Asegúrate de que la playlist sea pública.' });
-    return res.json({ platform: 'Spotify', type: kind, tracks, total: tracks.length });
+    
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    
+    // Send initial metadata
+    res.write(`event: meta\ndata: ${JSON.stringify({ platform: 'Spotify', type: kind, total: tracks.length })}\n\n`);
+    
+    for (const track of tracks) {
+      res.write(`data: ${JSON.stringify(track)}\n\n`);
+    }
+    res.write(`event: end\ndata: {}\n\n`);
+    return res.end();
   }
 
   // ── YouTube / SoundCloud / generic playlists via yt-dlp ───────────────────
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  res.write(`event: meta\ndata: ${JSON.stringify({ platform: 'Detecting...', type: kind, total: '?' })}\n\n`);
   const proc = spawn(YTDLP, [
     url,
     '--flat-playlist',
@@ -188,6 +206,8 @@ app.post('/api/playlist-info', async (req, res) => {
   const tracks = [];
   let buf = '', err = '';
 
+  let firstTrack = true;
+
   proc.stdout.on('data', d => {
     buf += d.toString();
     const lines = buf.split('\n');
@@ -196,7 +216,7 @@ app.post('/api/playlist-info', async (req, res) => {
       if (!line.trim()) continue;
       try {
         const item = JSON.parse(line);
-        tracks.push({
+        const track = {
           title:       item.title || item.id || 'Unknown',
           artist:      item.uploader || item.channel || item.creator || '',
           thumbnail:   item.thumbnail || (item.thumbnails?.[0]?.url) || '',
@@ -204,15 +224,50 @@ app.post('/api/playlist-info', async (req, res) => {
           duration:    item.duration,
           platform:    item.extractor_key || item.ie_key || 'Unknown',
           isSpotify:   false,
-        });
+        };
+        tracks.push(track);
+        if (firstTrack) {
+           res.write(`event: meta\ndata: ${JSON.stringify({ platform: track.platform, type: kind, total: '?' })}\n\n`);
+           firstTrack = false;
+        }
+        res.write(`data: ${JSON.stringify(track)}\n\n`);
       } catch {}
     }
   });
   proc.stderr.on('data', d => err += d);
   proc.on('close', code => {
-    if (tracks.length === 0) return res.status(500).json({ error: 'No se encontraron tracks en la playlist', details: err.slice(0, 300) });
-    res.json({ platform: tracks[0]?.platform || 'Unknown', type: kind, tracks, total: tracks.length });
+    if (tracks.length === 0) {
+       res.write(`event: error\ndata: ${JSON.stringify({ error: 'No se encontraron tracks', details: err.slice(0, 300) })}\n\n`);
+    }
+    res.write(`event: end\ndata: {}\n\n`);
+    res.end();
   });
+});
+
+// ─── ROUTE: AUDIO PREVIEW ─────────────────────────────────────────────────────
+app.get('/api/preview', (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('URL requerida');
+  
+  const decoded = decodeURIComponent(url);
+  const actualUrl = decoded.startsWith('SEARCH:') ? `ytsearch1:${decoded.slice(7)}` : decoded;
+
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  // Stream low quality audio for fast loading
+  const args = [
+    actualUrl, '-x', '--audio-format', 'mp3',
+    '--audio-quality', '9', '-o', '-', '--no-playlist',
+    ...YTDLP_BASE,
+    '-f', 'worstaudio/worst'
+  ];
+
+  const proc = spawn(YTDLP, args);
+  proc.stdout.pipe(res);
+  proc.on('close', () => { try { res.end(); } catch {} });
+  proc.on('error', () => { try { res.end(); } catch {} });
+  req.on('close', () => { try { proc.kill('SIGKILL'); } catch {} });
 });
 
 // ─── ROUTE: STREAM DOWNLOAD ───────────────────────────────────────────────────
@@ -295,6 +350,58 @@ app.post('/api/batch-info', async (req, res) => {
   }
 
   res.json(results);
+});
+
+// ─── ROUTE: DOWNLOAD ZIP (Streaming) ──────────────────────────────────────────
+app.post('/api/download-zip', (req, res) => {
+  const { tracks, format = 'mp3' } = req.body;
+  if (!Array.isArray(tracks) || tracks.length === 0) return res.status(400).json({ error: 'Tracks requeridos' });
+
+  const fmt = FORMATS[format] || FORMATS.mp3;
+  
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', `attachment; filename="DJDownloader_Batch.${fmt.ext}.zip"`);
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  const archive = archiver('zip', { zlib: { level: 0 } }); // No compression needed for audio
+  archive.pipe(res);
+
+  archive.on('error', err => {
+    console.error('Archiver error:', err);
+    try { res.end(); } catch {}
+  });
+
+  req.on('close', () => {
+    archive.abort();
+  });
+
+  (async function processTracks() {
+    let i = 1;
+    const padding = String(tracks.length).length;
+    for (const t of tracks) {
+      if (req.closed) break;
+      
+      const safeTitle = sanitize(t.title);
+      const filename = `${String(i).padStart(padding, '0')} - ${safeTitle}.${fmt.ext}`;
+      const url = t.url;
+      const actualUrl = url.startsWith('SEARCH:') ? `ytsearch1:${url.slice(7)}` : url;
+
+      const args = [
+        actualUrl, '-x', '--audio-format', fmt.codec, '--audio-quality', '0',
+        '-o', '-', '--no-playlist', ...YTDLP_BASE, '-f', 'bestaudio/best'
+      ];
+      if (fmt.postArgs.length) args.push('--postprocessor-args', ...fmt.postArgs);
+
+      await new Promise(resolve => {
+        const proc = spawn(YTDLP, args);
+        archive.append(proc.stdout, { name: filename });
+        proc.on('close', () => resolve());
+        proc.on('error', () => resolve());
+      });
+      i++;
+    }
+    archive.finalize();
+  })();
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────

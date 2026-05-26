@@ -287,6 +287,19 @@ body { font-family: var(--font); background: var(--bg); color: var(--t1); min-he
   color: var(--t3); font-size: 1.2rem;
 }
 
+.thumb-wrapper {
+  position: relative; width: 44px; height: 44px; border-radius: 8px; flex-shrink: 0; overflow: hidden;
+}
+.play-overlay {
+  position: absolute; inset: 0; background: rgba(0,0,0,0.5); 
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; opacity: 0; cursor: pointer; transition: all .2s var(--ease);
+  border: none;
+}
+.thumb-wrapper:hover .play-overlay { opacity: 1; }
+.play-overlay.playing { opacity: 1; background: rgba(124,58,237,0.7); }
+.play-overlay svg { width: 20px; height: 20px; }
+
 .batch-info { min-width: 0; }
 .batch-title-text { font-size: .88rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .batch-artist-text { font-size: .75rem; color: var(--t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
