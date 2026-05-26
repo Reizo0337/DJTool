@@ -15,10 +15,15 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Ensure temp and downloads dirs exist
+// ─── HEALTH CHECK (for UptimeRobot / Render keep-alive) ──────────────────────
+app.get('/health', (req, res) => res.json({ status: 'ok', uptime: process.uptime() }));
+
+// Ensure temp dir exists (downloads stream directly to browser in cloud mode)
 const TEMP_DIR = path.join(__dirname, 'temp');
 const DOWNLOADS_DIR = path.join(__dirname, 'downloads');
 [TEMP_DIR, DOWNLOADS_DIR].forEach(d => { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); });
+
+const IS_CLOUD = process.env.NODE_ENV === 'production';
 
 // WebSocket broadcast helper
 const clients = new Map();
@@ -38,30 +43,26 @@ function broadcast(jobId, data) {
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
 
-function findYtDlp() {
-  const candidates = ['yt-dlp', 'yt-dlp.exe'];
-  for (const c of candidates) {
+function findBin(names, versionFlag = '--version') {
+  const isWin = process.platform === 'win32';
+  const whereCmd = isWin ? 'where' : 'which';
+  for (const name of names) {
     try {
-      const result = require('child_process').execSync(`where ${c}`, { stdio: 'pipe' }).toString().trim();
-      if (result) return c;
+      require('child_process').execSync(`${whereCmd} ${name}`, { stdio: 'pipe' });
+      return name;
     } catch {}
   }
-  return 'yt-dlp';
+  return names[names.length - 1];
 }
 
-function findPython() {
-  const candidates = ['python', 'python3', 'py'];
-  for (const c of candidates) {
-    try {
-      const result = require('child_process').execSync(`${c} --version`, { stdio: 'pipe' }).toString();
-      if (result.includes('Python')) return c;
-    } catch {}
-  }
-  return 'python';
-}
+const YTDLP  = findBin(['yt-dlp', 'yt-dlp.exe']);
+const PYTHON = findBin(['python3', 'python', 'py']);
+console.log(`yt-dlp: ${YTDLP} | python: ${PYTHON}`);
 
-const YTDLP = findYtDlp();
-const PYTHON = findPython();
+const YTDLP_EXTRA_ARGS = [
+  '--no-check-certificates',
+  '--no-warnings',
+];
 
 function sanitizeFilename(str) {
   return str.replace(/[<>:"/\\|?*]/g, '_').substring(0, 100);
@@ -178,62 +179,77 @@ app.post('/api/analyze', async (req, res) => {
   });
 });
 
-// ─── ROUTE: DOWNLOAD TRACK ───────────────────────────────────────────────────
+// ─── ROUTE: DOWNLOAD TRACK (streaming directo al navegador) ──────────────────
+// En cloud: stream directo al browser sin guardar en disco
+// En local: guarda en disco Y permite streaming
 
+app.get('/api/download-stream', (req, res) => {
+  const { url, format = 'best', title = 'track' } = req.query;
+  if (!url) return res.status(400).send('URL required');
+
+  const safeName = sanitizeFilename(decodeURIComponent(title));
+  let ext, audioFormat;
+  if (format === 'mp3')      { ext = 'mp3';  audioFormat = 'mp3'; }
+  else if (format === 'wav') { ext = 'wav';  audioFormat = 'wav'; }
+  else                       { ext = 'opus'; audioFormat = 'best'; }
+
+  res.setHeader('Content-Disposition', `attachment; filename="${safeName}.${ext}"`);
+  res.setHeader('Content-Type', ext === 'wav' ? 'audio/wav' : ext === 'mp3' ? 'audio/mpeg' : 'audio/ogg');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  const ytArgs = [
+    decodeURIComponent(url), '-x',
+    '--audio-format', audioFormat,
+    '--audio-quality', '0',
+    '-o', '-',              // output to stdout
+    '--no-playlist',
+    '--quiet',
+    ...YTDLP_EXTRA_ARGS,
+  ];
+
+  const proc = spawn(YTDLP, ytArgs);
+  proc.stdout.pipe(res);
+  proc.stderr.on('data', d => console.error('[yt-dlp]', d.toString().trim()));
+  proc.on('close', (code) => {
+    if (code !== 0 && !res.headersSent) res.status(500).send('Download failed');
+    else { try { res.end(); } catch {} }
+  });
+  req.on('close', () => proc.kill());
+});
+
+// Also keep disk-based download for local mode (for the library feature)
 app.post('/api/download', async (req, res) => {
   const { url, format = 'best', title = 'track' } = req.body;
-
   if (!url) return res.status(400).json({ error: 'URL is required' });
 
   const jobId = `dl_${Date.now()}`;
   const safeName = sanitizeFilename(title);
-
-  let ext, audioFormat, audioQuality;
-
-  if (format === 'mp3') {
-    ext = 'mp3'; audioFormat = 'mp3'; audioQuality = '0';
-  } else if (format === 'wav') {
-    ext = 'wav'; audioFormat = 'wav'; audioQuality = '0';
-  } else {
-    ext = 'opus'; audioFormat = 'best'; audioQuality = '0';
-  }
+  let ext, audioFormat;
+  if (format === 'mp3')      { ext = 'mp3';  audioFormat = 'mp3'; }
+  else if (format === 'wav') { ext = 'wav';  audioFormat = 'wav'; }
+  else                       { ext = 'opus'; audioFormat = 'best'; }
 
   const outFile = path.join(DOWNLOADS_DIR, `${safeName}_${jobId}.${ext}`);
-
   res.json({ jobId, message: 'Download started' });
 
   const ytArgs = [
     url, '-x',
     '--audio-format', audioFormat,
-    '--audio-quality', audioQuality,
+    '--audio-quality', '0',
     '-o', outFile,
-    '--no-playlist',
-    '--newline',
+    '--no-playlist', '--newline',
+    ...YTDLP_EXTRA_ARGS,
   ];
 
   const ytProcess = spawn(YTDLP, ytArgs);
-
-  ytProcess.stdout.on('data', (data) => {
-    const line = data.toString();
-    const match = line.match(/(\d+\.?\d*)%/);
-    if (match) {
-      broadcast(jobId, { stage: 'downloading', progress: parseFloat(match[1]), filename: path.basename(outFile) });
-    }
-  });
-
-  ytProcess.stderr.on('data', (data) => {
-    const line = data.toString();
-    const match = line.match(/(\d+\.?\d*)%/);
-    if (match) {
-      broadcast(jobId, { stage: 'downloading', progress: parseFloat(match[1]), filename: path.basename(outFile) });
-    }
-  });
-
+  const onProgress = (data) => {
+    const match = data.toString().match(/(\d+\.?\d*)%/);
+    if (match) broadcast(jobId, { stage: 'downloading', progress: parseFloat(match[1]), filename: path.basename(outFile) });
+  };
+  ytProcess.stdout.on('data', onProgress);
+  ytProcess.stderr.on('data', onProgress);
   ytProcess.on('close', (code) => {
-    if (code !== 0) {
-      broadcast(jobId, { stage: 'error', message: 'Error al descargar el track.' });
-      return;
-    }
+    if (code !== 0) { broadcast(jobId, { stage: 'error', message: 'Error al descargar el track.' }); return; }
     broadcast(jobId, { stage: 'done', message: 'Descarga completada', filename: path.basename(outFile), path: outFile });
   });
 });
