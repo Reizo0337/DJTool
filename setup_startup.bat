@@ -23,9 +23,9 @@ echo WshShell.CurrentDirectory = "%~dp0"
 echo WshShell.Run "node server.js", 0, false
 ) > "%~dp0run_djdownloader.vbs"
 
-:: 2. Crear el acceso directo en la carpeta de Inicio usando comillas simples para evitar escapes del backslash
+:: 2. Crear el acceso directo expandiendo %APPDATA% en CMD antes de enviarlo a PowerShell
 echo [*] Registrando acceso directo en tu carpeta de Inicio (Startup)...
-powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\DJDownloader.lnk'); $Shortcut.TargetPath = '%~dp0run_djdownloader.vbs'; $Shortcut.WorkingDirectory = '%~dp0'; $Shortcut.IconLocation = 'shell32.dll, 137'; $Shortcut.Save()"
+powershell -Command "$WshShell = New-Object -ComObject WScript.Shell; $Shortcut = $WshShell.CreateShortcut('%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DJDownloader.lnk'); $Shortcut.TargetPath = '%~dp0run_djdownloader.vbs'; $Shortcut.WorkingDirectory = '%~dp0'; $Shortcut.IconLocation = 'shell32.dll, 137'; $Shortcut.Save()"
 
 echo.
 echo ====================================================================
