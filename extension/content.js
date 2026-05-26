@@ -18,12 +18,33 @@
   checkUrlAndUpdateWidget();
   attemptNativeInjections();
 
+  // Listen for messages from popup to obtain currently playing track dynamically
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'get_playing_track') {
+      const titleLink = document.querySelector('.playbackSoundBadge__titleLink');
+      if (titleLink) {
+        const path = titleLink.getAttribute('href');
+        const trackUrl = window.location.origin + path;
+        const titleText = titleLink.textContent.trim();
+        const artistLink = document.querySelector('.playbackSoundBadge__lightLink');
+        const artistText = artistLink ? artistLink.textContent.trim() : '';
+        sendResponse({ success: true, url: trackUrl, title: titleText, artist: artistText });
+      } else {
+        sendResponse({ success: false });
+      }
+      return true; // Keep channel open for async response
+    }
+  });
+
   function checkUrlAndUpdateWidget() {
     const isSpotify = /spotify\.com\/track/i.test(currentUrl);
     const isYoutube = /youtube\.com\/watch|youtu\.be/i.test(currentUrl);
     const isSoundCloud = /soundcloud\.com\/[^\/]+\/[^\/]+/i.test(currentUrl) && !/soundcloud\.com\/.*\/sets\//i.test(currentUrl);
 
-    if (isSpotify || isYoutube || isSoundCloud) {
+    // SoundCloud special: also show floating widget if something is currently playing in bottom player
+    const soundcloudPlaying = /soundcloud\.com/i.test(currentUrl) && document.querySelector('.playbackSoundBadge__titleLink');
+
+    if (isSpotify || isYoutube || isSoundCloud || soundcloudPlaying) {
       createFloatingWidget(isSpotify ? 'Spotify' : (isYoutube ? 'YouTube' : 'SoundCloud'));
     } else {
       removeFloatingWidget();
@@ -36,11 +57,18 @@
   function attemptNativeInjections() {
     const isSpotify = /spotify\.com\/track/i.test(window.location.href);
     const isYoutube = /youtube\.com\/watch/i.test(window.location.href);
-    const isSoundCloud = /soundcloud\.com\/[^\/]+\/[^\/]+/i.test(window.location.href) && !/soundcloud\.com\/.*\/sets\//i.test(window.location.href);
+    const isSoundCloud = /soundcloud\.com/i.test(window.location.href);
 
     if (isYoutube) injectYoutubeButton();
     if (isSpotify) injectSpotifyButton();
-    if (isSoundCloud) injectSoundCloudButton();
+    if (isSoundCloud) {
+      // Injects on track page
+      if (/soundcloud\.com\/[^\/]+\/[^\/]+/i.test(window.location.href) && !/soundcloud\.com\/.*\/sets\//i.test(window.location.href)) {
+        injectSoundCloudButton();
+      }
+      // ALWAYS inject on the global bottom player
+      injectSoundCloudBottomPlayerButton();
+    }
   }
 
   // 1. YOUTUBE INJECTION
@@ -138,11 +166,10 @@
       triggerGenericDownload(window.location.href, btn);
     });
 
-    // Spotify row usually contains play button first. We append it to the end or before details
     anchor.appendChild(btn);
   }
 
-  // 3. SOUNDCLOUD INJECTION
+  // 3. SOUNDCLOUD TRACK PAGE INJECTION
   function injectSoundCloudButton() {
     if (document.getElementById('dj-dl-soundcloud-native')) return;
 
@@ -179,6 +206,53 @@
     btn.addEventListener('click', (e) => {
       e.preventDefault();
       triggerGenericDownload(window.location.href, btn);
+    });
+
+    anchor.appendChild(btn);
+  }
+
+  // 4. SOUNDCLOUD GLOBAL BOTTOM PLAYER INJECTION
+  function injectSoundCloudBottomPlayerButton() {
+    if (document.getElementById('dj-dl-soundcloud-bottom')) return;
+
+    const anchor = document.querySelector('.playbackSoundBadge__actions');
+    if (!anchor) return;
+
+    const btn = document.createElement('button');
+    btn.id = 'dj-dl-soundcloud-bottom';
+    btn.title = 'Descargar tema actual con DJDownloader';
+    btn.style.cssText = `
+      background: none !important;
+      border: none !important;
+      margin-left: 6px !important;
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      cursor: pointer !important;
+      color: #a78bfa !important;
+      transition: color 0.2s, transform 0.2s !important;
+      padding: 0 4px !important;
+    `;
+
+    btn.innerHTML = `
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width: 15px; height: 15px; display: inline-block;">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke-linecap="round"/>
+        <polyline points="7 10 12 15 17 10" stroke-linecap="round" stroke-linejoin="round"/>
+        <line x1="12" y1="15" x2="12" y2="3" stroke-linecap="round"/>
+      </svg>
+    `;
+
+    btn.addEventListener('mouseenter', () => btn.style.color = '#22d3ee');
+    btn.addEventListener('mouseleave', () => btn.style.color = '#a78bfa');
+
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      const titleLink = document.querySelector('.playbackSoundBadge__titleLink');
+      if (titleLink) {
+        const path = titleLink.getAttribute('href');
+        const trackUrl = window.location.origin + path;
+        triggerGenericDownload(trackUrl, btn);
+      }
     });
 
     anchor.appendChild(btn);
@@ -259,7 +333,17 @@
     document.body.appendChild(floatingBtn);
 
     floatingBtn.addEventListener('click', () => {
-      triggerGenericDownload(window.location.href, floatingBtn);
+      // In SoundCloud, if we are not on a track page, grab the bottom player URL dynamically
+      const titleLink = document.querySelector('.playbackSoundBadge__titleLink');
+      const soundcloudPlaying = /soundcloud\.com/i.test(window.location.href) && titleLink;
+      
+      let downloadUrl = window.location.href;
+      if (soundcloudPlaying && !/soundcloud\.com\/[^\/]+\/[^\/]+/i.test(window.location.href)) {
+        const path = titleLink.getAttribute('href');
+        downloadUrl = window.location.origin + path;
+      }
+
+      triggerGenericDownload(downloadUrl, floatingBtn);
     });
   }
 
@@ -285,6 +369,8 @@
 
     if (isFloating) {
       buttonElement.querySelector('.dj-widget-text').textContent = 'Obteniendo info...';
+    } else if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
+      buttonElement.style.color = '#e11d48'; // loading color
     } else {
       buttonElement.textContent = 'Procesando...';
     }
@@ -306,6 +392,8 @@
         
         if (isFloating) {
           buttonElement.querySelector('.dj-widget-text').innerHTML = '¡Descargando track!';
+        } else if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
+          buttonElement.style.color = '#10b981'; // success green
         } else {
           buttonElement.textContent = 'Descargando...';
         }
@@ -322,12 +410,17 @@
             buttonElement.innerHTML = originalHtml;
             buttonElement.style.opacity = '1';
             buttonElement.style.pointerEvents = 'auto';
+            if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
+              buttonElement.style.color = '#a78bfa';
+            }
           }, 3000);
         });
 
       } catch (err) {
         if (isFloating) {
           buttonElement.querySelector('.dj-widget-text').innerHTML = '<span style="color:#f43f5e">Servidor desconectado</span>';
+        } else if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
+          buttonElement.style.color = '#f43f5e'; // error red
         } else {
           buttonElement.innerHTML = 'Error de conexión';
           buttonElement.style.background = '#f43f5e !important';
@@ -337,7 +430,9 @@
           buttonElement.innerHTML = originalHtml;
           buttonElement.style.opacity = '1';
           buttonElement.style.pointerEvents = 'auto';
-          if (!isFloating) {
+          if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
+            buttonElement.style.color = '#a78bfa';
+          } else if (!isFloating) {
             buttonElement.style.background = ''; // reset background
           }
         }, 3000);

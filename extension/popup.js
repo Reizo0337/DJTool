@@ -120,17 +120,34 @@ function detectActiveTab() {
       return;
     }
 
-    const isSpotify = /spotify\.com\/track/i.test(url);
-    const isYoutube = /youtube\.com\/watch|youtu\.be/i.test(url);
-    const isSoundCloud = /soundcloud\.com\/[^\/]+\/[^\/]+/i.test(url) && !/soundcloud\.com\/.*\/sets\//i.test(url);
-
-    if (isSpotify || isYoutube || isSoundCloud) {
-      showLoadingDetection(url, isSpotify ? 'Spotify' : (isYoutube ? 'YouTube' : 'SoundCloud'));
-      fetchTrackInfo(url);
-    } else {
-      showUndetected();
+    // Try to ask the content script first if there is a playing track (useful for SoundCloud feed/stream)
+    try {
+      chrome.tabs.sendMessage(tab.id, { action: 'get_playing_track' }, (response) => {
+        if (response && response.success && response.url) {
+          showLoadingDetection(response.url, 'SoundCloud (Reproduciendo)');
+          fetchTrackInfo(response.url);
+        } else {
+          // Fallback to standard URL matching
+          runUrlDetection(url);
+        }
+      });
+    } catch (e) {
+      runUrlDetection(url);
     }
   });
+}
+
+function runUrlDetection(url) {
+  const isSpotify = /spotify\.com\/track/i.test(url);
+  const isYoutube = /youtube\.com\/watch|youtu\.be/i.test(url);
+  const isSoundCloud = /soundcloud\.com\/[^\/]+\/[^\/]+/i.test(url) && !/soundcloud\.com\/.*\/sets\//i.test(url);
+
+  if (isSpotify || isYoutube || isSoundCloud) {
+    showLoadingDetection(url, isSpotify ? 'Spotify' : (isYoutube ? 'YouTube' : 'SoundCloud'));
+    fetchTrackInfo(url);
+  } else {
+    showUndetected();
+  }
 }
 
 function showUndetected() {
