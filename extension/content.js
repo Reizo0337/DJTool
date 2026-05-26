@@ -1,6 +1,6 @@
 // DJDownloader Companion — Content Script
 
-(function() {
+(function () {
   let floatingBtn = null;
   let currentUrl = window.location.href;
 
@@ -76,11 +76,11 @@
     if (document.getElementById('dj-dl-yt-native')) return;
 
     // Search for YouTube action row or owner channel container
-    const anchor = document.querySelector('ytd-watch-metadata #owner') || 
-                   document.querySelector('#owner') ||
-                   document.querySelector('ytd-watch-metadata #subscribe-button') ||
-                   document.querySelector('#top-row.ytd-video-primary-info-renderer');
-    
+    const anchor = document.querySelector('ytd-watch-metadata #owner') ||
+      document.querySelector('#owner') ||
+      document.querySelector('ytd-watch-metadata #subscribe-button') ||
+      document.querySelector('#top-row.ytd-video-primary-info-renderer');
+
     if (!anchor) return;
 
     const btn = document.createElement('button');
@@ -119,8 +119,8 @@
       triggerGenericDownload(window.location.href, btn);
     });
 
-    const subscribeBtn = document.querySelector('ytd-watch-metadata #subscribe-button') || 
-                         document.querySelector('#subscribe-button');
+    const subscribeBtn = document.querySelector('ytd-watch-metadata #subscribe-button') ||
+      document.querySelector('#subscribe-button');
 
     if (subscribeBtn) {
       subscribeBtn.parentNode.insertBefore(btn, subscribeBtn.nextSibling);
@@ -181,8 +181,8 @@
     if (document.getElementById('dj-dl-soundcloud-native')) return;
 
     // Search for SoundCloud action buttons group
-    const anchor = document.querySelector('.listenEngagement__actions .sc-button-group') || 
-                   document.querySelector('.soundActions .sc-button-group');
+    const anchor = document.querySelector('.listenEngagement__actions .sc-button-group') ||
+      document.querySelector('.soundActions .sc-button-group');
     if (!anchor) return;
 
     const btn = document.createElement('button');
@@ -273,7 +273,7 @@
 
     floatingBtn = document.createElement('div');
     floatingBtn.id = 'dj-downloader-floating-widget';
-    
+
     // Style block
     const style = document.createElement('style');
     style.id = 'dj-downloader-styles';
@@ -330,7 +330,7 @@
         color: #a78bfa;
       }
     `;
-    
+
     floatingBtn.innerHTML = `
       <div class="dj-widget-icon">DJ</div>
       <div class="dj-widget-text">Descargar con <span>DJDownloader</span></div>
@@ -343,7 +343,7 @@
       // In SoundCloud, if we are not on a track page, grab the bottom player URL dynamically
       const titleLink = document.querySelector('.playbackSoundBadge__titleLink');
       const soundcloudPlaying = /soundcloud\.com/i.test(window.location.href) && titleLink;
-      
+
       let downloadUrl = window.location.href;
       if (soundcloudPlaying && !/soundcloud\.com\/[^\/]+\/[^\/]+/i.test(window.location.href)) {
         const path = titleLink.getAttribute('href');
@@ -396,7 +396,7 @@
         if (!infoRes.ok) throw new Error();
 
         const info = await infoRes.json();
-        
+
         if (isFloating) {
           buttonElement.querySelector('.dj-widget-text').innerHTML = '¡Descargando track!';
         } else if (buttonElement.id === 'dj-dl-soundcloud-bottom') {
