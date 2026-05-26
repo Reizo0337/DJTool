@@ -315,6 +315,65 @@ app.get('/api/file/:filename', (req, res) => {
   res.download(filePath);
 });
 
+// ─── ROUTE: TEST ACR CREDENTIALS ─────────────────────────────────────────────
+
+app.post('/api/test-acr', async (req, res) => {
+  const { acrHost, acrKey, acrSecret } = req.body;
+  if (!acrHost || !acrKey || !acrSecret) return res.json({ ok: false, error: 'Credenciales incompletas' });
+
+  const crypto = require('crypto');
+  const https  = require('https');
+  const querystring = require('querystring');
+
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const httpMethod = 'POST';
+  const httpUri    = '/v1/identify';
+  const dataType   = 'audio';
+  const signVersion = '1';
+
+  const stringToSign = [httpMethod, httpUri, acrKey, dataType, signVersion, timestamp].join('\n');
+  const sign = crypto.createHmac('sha1', acrSecret).update(stringToSign).digest('base64');
+
+  // Send a tiny silent audio sample (1 byte — will get "no result" but proves auth works)
+  const silentAudio = Buffer.alloc(100, 0);
+  const boundary = 'TestBoundary';
+  let body = '';
+  const fields = { access_key: acrKey, sample_bytes: String(silentAudio.length), timestamp, signature: sign, data_type: dataType, signature_version: signVersion };
+
+  let bodyBuf = Buffer.alloc(0);
+  for (const [k, v] of Object.entries(fields)) {
+    bodyBuf = Buffer.concat([bodyBuf, Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`)]);
+  }
+  bodyBuf = Buffer.concat([bodyBuf, Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="sample"; filename="test.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`), silentAudio, Buffer.from(`\r\n--${boundary}--\r\n`)]);
+
+  const options = {
+    hostname: acrHost, method: 'POST', path: httpUri,
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': bodyBuf.length }
+  };
+
+  const request = https.request(options, (response) => {
+    let data = '';
+    response.on('data', c => data += c);
+    response.on('end', () => {
+      try {
+        const json = JSON.parse(data);
+        // code 0 = match, 1001 = no result (both mean auth is OK), 3003 = auth error
+        const code = json.status?.code;
+        if (code === 0 || code === 1001) {
+          res.json({ ok: true });
+        } else {
+          res.json({ ok: false, error: json.status?.msg || 'Auth failed' });
+        }
+      } catch {
+        res.json({ ok: false, error: 'Parse error' });
+      }
+    });
+  });
+  request.on('error', (e) => res.json({ ok: false, error: e.message }));
+  request.write(bodyBuf);
+  request.end();
+});
+
 // ─── START ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
